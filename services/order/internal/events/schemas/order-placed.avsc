@@ -1,0 +1,24 @@
+{
+  "type": "record",
+  "name": "OrderPlaced",
+  "namespace": "orderflow.order",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "customer_id", "type": "string"},
+    {"name": "items", "type": {
+      "type": "array",
+      "items": {
+        "type": "record",
+        "name": "OrderItem",
+        "fields": [
+          {"name": "sku", "type": "string"},
+          {"name": "qty", "type": "int"},
+          {"name": "unit_price_cents", "type": "long"}
+        ]
+      }
+    }},
+    {"name": "total_cents", "type": "long"}
+  ]
+}
