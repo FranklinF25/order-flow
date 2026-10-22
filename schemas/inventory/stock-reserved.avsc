@@ -16,6 +16,7 @@
           {"name": "qty", "type": "int"}
         ]
       }
-    }}
+    }},
+    {"name": "total_cents", "type": "long", "default": 0, "doc": "Echo of OrderPlaced.total_cents so payment can charge without another subscription (v2, additive with default)"}
   ]
 }
