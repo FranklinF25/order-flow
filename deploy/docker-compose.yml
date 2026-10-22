@@ -1,0 +1,157 @@
+name: order-flow
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: order-flow-kafka
+    environment:
+      CLUSTER_ID: "5L6g3nShT-eMCtK--X86sw"
+      # KRaft single node
+      KAFKA_NODE_ID: "0"
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 0@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # Dual listener: containers use kafka:29092, host debugging uses localhost:9092
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # Single-broker cluster: internal topics must have RF=1 or the controller
+      # refuses creation and consumer joins hang forever
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      # DEV-ONLY: auto-create ON so Kafka internal topics (__consumer_offsets) bootstrap —
+      # Schema Registry leader election needs them. Business topics stay explicit (Makefile);
+      # prod (M4) runs with auto-create OFF and provisioned topics.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    ports:
+      - "9092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    container_name: order-flow-schema-registry
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: "1"
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8081/subjects >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      # leader-elect join group takes ~60s on cold start
+      start_period: 90s
+
+  order-db:
+    image: postgres:16-alpine
+    container_name: order-flow-order-db
+    environment:
+      POSTGRES_DB: order
+      POSTGRES_USER: order
+      POSTGRES_PASSWORD: order
+    ports:
+      - "5432:5432"
+    volumes:
+      - order-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order -d order"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  inventory-db:
+    image: postgres:16-alpine
+    container_name: order-flow-inventory-db
+    environment:
+      POSTGRES_DB: inventory
+      POSTGRES_USER: inventory
+      POSTGRES_PASSWORD: inventory
+    ports:
+      - "5433:5432"
+    volumes:
+      - inventory-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventory -d inventory"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  payment-db:
+    image: postgres:16-alpine
+    container_name: order-flow-payment-db
+    environment:
+      POSTGRES_DB: payment
+      POSTGRES_USER: payment
+      POSTGRES_PASSWORD: payment
+    ports:
+      - "5434:5432"
+    volumes:
+      - payment-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U payment -d payment"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: order-flow-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: order-flow-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbit-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # API gateway. Routes to the Go service containers on the compose network.
+  gateway:
+    image: nginx:alpine
+    container_name: order-flow-gateway
+    volumes:
+      - ./gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      # host 8088: llama-server owns 127.0.0.1:8080 on this machine
+      - "8088:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+volumes:
+  kafka-data:
+  order-db-data:
+  inventory-db-data:
+  payment-db-data:
+  rabbit-data:
