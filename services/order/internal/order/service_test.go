@@ -8,13 +8,16 @@ import (
 
 // fakeStore is an in-memory Store for deterministic app-service tests.
 type fakeStore struct {
-	saved  []Order
-	outbox []OutboxEvent
-	orders map[string]*Order
-	failOn string // method name to force an error
+	saved     []Order
+	outbox    []OutboxEvent
+	orders    map[string]*Order
+	processed map[string]bool
+	failOn    string // method name to force an error
 }
 
-func newFakeStore() *fakeStore { return &fakeStore{orders: map[string]*Order{}} }
+func newFakeStore() *fakeStore {
+	return &fakeStore{orders: map[string]*Order{}, processed: map[string]bool{}}
+}
 
 func (f *fakeStore) SaveOrder(_ context.Context, o *Order) error {
 	if f.failOn == "SaveOrder" {
@@ -41,15 +44,50 @@ func (f *fakeStore) AppendOutbox(_ context.Context, e OutboxEvent) error {
 	return nil
 }
 
+func (f *fakeStore) UpdateOrder(_ context.Context, o *Order) error {
+	if f.failOn == "UpdateOrder" {
+		return errors.New("boom")
+	}
+	f.orders[o.ID] = o
+	for i := range f.saved {
+		if f.saved[i].ID == o.ID {
+			f.saved[i] = *o
+		}
+	}
+	return nil
+}
+
+func (f *fakeStore) InsertProcessedEvent(_ context.Context, eventID string) (bool, error) {
+	if f.failOn == "InsertProcessedEvent" {
+		return false, errors.New("boom")
+	}
+	if f.processed[eventID] {
+		return false, nil
+	}
+	f.processed[eventID] = true
+	return true, nil
+}
+
 // fakeTx models a real DB transaction: rollback restores prior state on error.
 type fakeTx struct{ store *fakeStore }
 
 func (f *fakeTx) WithinTx(ctx context.Context, fn func(context.Context, Store) error) error {
 	savedSnap := append([]Order(nil), f.store.saved...)
 	outboxSnap := append([]OutboxEvent(nil), f.store.outbox...)
+	ordersSnap := make(map[string]*Order, len(f.store.orders))
+	for k, v := range f.store.orders {
+		cp := *v
+		ordersSnap[k] = &cp
+	}
+	processedSnap := make(map[string]bool, len(f.store.processed))
+	for k, v := range f.store.processed {
+		processedSnap[k] = v
+	}
 	if err := fn(ctx, f.store); err != nil {
 		f.store.saved = savedSnap
 		f.store.outbox = outboxSnap
+		f.store.orders = ordersSnap
+		f.store.processed = processedSnap
 		return err
 	}
 	return nil

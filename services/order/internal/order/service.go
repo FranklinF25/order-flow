@@ -23,7 +23,11 @@ var ErrOrderNotFound = errors.New("order not found")
 type Store interface {
 	SaveOrder(ctx context.Context, o *Order) error
 	GetOrder(ctx context.Context, id string) (*Order, error)
+	UpdateOrder(ctx context.Context, o *Order) error
 	AppendOutbox(ctx context.Context, e OutboxEvent) error
+	// InsertProcessedEvent is the consume-side idempotency guard: false means
+	// the event was already processed (replay → silent no-op).
+	InsertProcessedEvent(ctx context.Context, eventID string) (bool, error)
 }
 
 // Tx runs a unit of work atomically: the Store handed to fn is scoped to one
@@ -87,6 +91,59 @@ func (s *Service) PlaceOrder(ctx context.Context, in PlaceOrderInput) (*Order, e
 // GetOrder exposes the read side for the REST adapter.
 func (s *Service) GetOrder(ctx context.Context, id string) (*Order, error) {
 	return s.reads.GetOrder(ctx, id)
+}
+
+// OnStockReserved applies the inventory.events StockReserved fact:
+// AWAITING_STOCK → AWAITING_PAYMENT. Duplicate event ids are silent no-ops
+// (processed_events guard inside the same transaction).
+func (s *Service) OnStockReserved(ctx context.Context, eventID, orderID string) error {
+	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		inserted, err := st.InsertProcessedEvent(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return nil
+		}
+		o, err := st.GetOrder(ctx, orderID)
+		if err != nil {
+			return err
+		}
+		if err := o.OnStockReserved(); err != nil {
+			return err
+		}
+		return st.UpdateOrder(ctx, o)
+	})
+}
+
+// OnPaymentCaptured applies the payment.events PaymentCaptured fact:
+// AWAITING_PAYMENT → CONFIRMED, appending OrderConfirmed to the outbox in the
+// same transaction. Duplicate event ids are silent no-ops.
+func (s *Service) OnPaymentCaptured(ctx context.Context, eventID, orderID string) error {
+	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		inserted, err := st.InsertProcessedEvent(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return nil
+		}
+		o, err := st.GetOrder(ctx, orderID)
+		if err != nil {
+			return err
+		}
+		if err := o.OnPaymentCaptured(); err != nil {
+			return err
+		}
+		if err := st.UpdateOrder(ctx, o); err != nil {
+			return err
+		}
+		ev, err := s.enc.OrderConfirmed(*o)
+		if err != nil {
+			return err
+		}
+		return st.AppendOutbox(ctx, ev)
+	})
 }
 
 // NewUUID returns a random RFC 4122 v4 UUID string (stdlib only).

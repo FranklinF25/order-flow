@@ -64,3 +64,16 @@ func (s *Serde) Encode(schemaID int, payload []byte) []byte {
 	copy(out[5:], payload)
 	return out
 }
+
+// StripWire removes the Confluent wire envelope (magic 0x00 + int32 BE schema
+// id) and returns the Avro body. Decoding uses the EMBEDDED schema; the
+// registry id is advisory in M1 (documented choice, topology §4).
+func StripWire(value []byte) ([]byte, error) {
+	if len(value) < 5 {
+		return nil, fmt.Errorf("wire payload too short: %d bytes", len(value))
+	}
+	if value[0] != 0x00 {
+		return nil, fmt.Errorf("unsupported wire format magic byte %#x", value[0])
+	}
+	return value[5:], nil
+}

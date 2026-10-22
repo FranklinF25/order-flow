@@ -47,6 +47,63 @@ type OrderConfirmed struct {
 	OccurredAt string `avro:"occurred_at"`
 }
 
+// Consume-side records (topology §6 subscriptions).
+
+const (
+	StockReservedType   = "orderflow.inventory.StockReserved"
+	PaymentCapturedType = "orderflow.payment.PaymentCaptured"
+)
+
+// StockItem is a reserved line on the inventory stream.
+type StockItem struct {
+	SKU string `avro:"sku"`
+	Qty int    `avro:"qty"`
+}
+
+// StockReserved is consumed from inventory.events.
+type StockReserved struct {
+	EventID    string      `avro:"event_id"`
+	OrderID    string      `avro:"order_id"`
+	OccurredAt string      `avro:"occurred_at"`
+	Items      []StockItem `avro:"items"`
+	TotalCents int64       `avro:"total_cents"`
+}
+
+// PaymentCaptured is consumed from payment.events.
+type PaymentCaptured struct {
+	EventID     string `avro:"event_id"`
+	OrderID     string `avro:"order_id"`
+	OccurredAt  string `avro:"occurred_at"`
+	PaymentID   string `avro:"payment_id"`
+	AmountCents int64  `avro:"amount_cents"`
+}
+
+// DecodeStockReserved decodes a StockReserved Avro body (wire envelope already stripped).
+func DecodeStockReserved(payload []byte) (StockReserved, error) {
+	c, err := codec("stock-reserved")
+	if err != nil {
+		return StockReserved{}, err
+	}
+	var ev StockReserved
+	if err := avro.Unmarshal(c, payload, &ev); err != nil {
+		return StockReserved{}, fmt.Errorf("unmarshal StockReserved: %w", err)
+	}
+	return ev, nil
+}
+
+// DecodePaymentCaptured decodes a PaymentCaptured Avro body (wire envelope already stripped).
+func DecodePaymentCaptured(payload []byte) (PaymentCaptured, error) {
+	c, err := codec("payment-captured")
+	if err != nil {
+		return PaymentCaptured{}, err
+	}
+	var ev PaymentCaptured
+	if err := avro.Unmarshal(c, payload, &ev); err != nil {
+		return PaymentCaptured{}, fmt.Errorf("unmarshal PaymentCaptured: %w", err)
+	}
+	return ev, nil
+}
+
 var (
 	codecMu sync.Mutex
 	codecs  = map[string]avro.Schema{}

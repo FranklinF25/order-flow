@@ -92,8 +92,16 @@ func (t *txStore) GetOrder(ctx context.Context, id string) (*order.Order, error)
 	return getOrder(ctx, t.tx, id)
 }
 
+func (t *txStore) UpdateOrder(ctx context.Context, o *order.Order) error {
+	return updateOrder(ctx, t.tx, o)
+}
+
 func (t *txStore) AppendOutbox(ctx context.Context, e order.OutboxEvent) error {
 	return appendOutbox(ctx, t.tx, e)
+}
+
+func (t *txStore) InsertProcessedEvent(ctx context.Context, eventID string) (bool, error) {
+	return insertProcessedEvent(ctx, t.tx, eventID)
 }
 
 // Pool-level Store methods (reads and writes outside an explicit tx).
@@ -108,6 +116,33 @@ func (s *Store) GetOrder(ctx context.Context, id string) (*order.Order, error) {
 
 func (s *Store) AppendOutbox(ctx context.Context, e order.OutboxEvent) error {
 	return appendOutbox(ctx, s.pool, e)
+}
+
+func (s *Store) UpdateOrder(ctx context.Context, o *order.Order) error {
+	return updateOrder(ctx, s.pool, o)
+}
+
+func (s *Store) InsertProcessedEvent(ctx context.Context, eventID string) (bool, error) {
+	return insertProcessedEvent(ctx, s.pool, eventID)
+}
+
+func updateOrder(ctx context.Context, ex execer, o *order.Order) error {
+	_, err := ex.Exec(ctx,
+		`UPDATE orders SET status = $2, cancel_reason = $3, updated_at = now() WHERE id = $1`,
+		o.ID, string(o.Status), string(o.CancelReason),
+	)
+	return err
+}
+
+func insertProcessedEvent(ctx context.Context, ex execer, eventID string) (bool, error) {
+	tag, err := ex.Exec(ctx,
+		`INSERT INTO processed_events (event_id) VALUES ($1) ON CONFLICT (event_id) DO NOTHING`,
+		eventID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 func saveOrder(ctx context.Context, ex execer, o *order.Order) error {

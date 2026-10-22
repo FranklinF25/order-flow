@@ -45,6 +45,20 @@ func main() {
 	go relay.Run(ctx)
 
 	svc := order.NewService(store, store, events.NewEncoder())
+
+	// Saga subscriptions (topology §6): order reacts to inventory.events and
+	// payment.events, each in its own consumer group.
+	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events", orderkafka.StockReservedHandler(svc))
+	if err != nil {
+		log.Fatalf("inventory consumer: %v", err)
+	}
+	go invConsumer.Run(ctx)
+
+	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events", orderkafka.PaymentCapturedHandler(svc))
+	if err != nil {
+		log.Fatalf("payment consumer: %v", err)
+	}
+	go payConsumer.Run(ctx)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           httpapi.New(svc),
