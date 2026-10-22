@@ -1,0 +1,20 @@
+{
+  "type": "record",
+  "name": "NotificationSent",
+  "namespace": "orderflow.notification",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "kind", "type": {
+      "type": "enum",
+      "name": "NotificationKind",
+      "symbols": ["ORDER_CONFIRMED", "ORDER_CANCELLED"]
+    }},
+    {"name": "channel", "type": {
+      "type": "enum",
+      "name": "Channel",
+      "symbols": ["EMAIL", "SMS"]
+    }}
+  ]
+}

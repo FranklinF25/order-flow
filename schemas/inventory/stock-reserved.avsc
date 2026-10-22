@@ -1,0 +1,21 @@
+{
+  "type": "record",
+  "name": "StockReserved",
+  "namespace": "orderflow.inventory",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "items", "type": {
+      "type": "array",
+      "items": {
+        "type": "record",
+        "name": "StockItem",
+        "fields": [
+          {"name": "sku", "type": "string"},
+          {"name": "qty", "type": "int"}
+        ]
+      }
+    }}
+  ]
+}

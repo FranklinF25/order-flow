@@ -1,0 +1,10 @@
+{
+  "type": "record",
+  "name": "OrderConfirmed",
+  "namespace": "orderflow.order",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"}
+  ]
+}

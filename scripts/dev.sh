@@ -22,6 +22,7 @@ case "$cmd" in
     $COMPOSE exec -T kafka $KAFKA_TOPICS --bootstrap-server "$BROKER" --list
     ;;
   subjects) curl -s http://localhost:8081/subjects | sort ;;
+  schemas) ./scripts/register-schemas.sh ;;
   clean)   $COMPOSE down -v ;;
   *) echo "usage: scripts/dev.sh {up|down|ps|logs|dev|topics|subjects|clean}" ;;
 esac

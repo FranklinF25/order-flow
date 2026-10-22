@@ -4,13 +4,16 @@ KAFKA_TOPICS := /opt/kafka/bin/kafka-topics.sh
 BROKER := localhost:9092
 SR := http://localhost:8081
 
-.PHONY: up down dev ps logs topics subjects clean
+.PHONY: up down dev ps logs topics subjects schemas clean
 
 up:
 	$(COMPOSE) up -d
 
 dev:
 	$(COMPOSE) --profile dev up -d --build --wait
+
+schemas:
+	./scripts/register-schemas.sh
 
 down:
 	$(COMPOSE) down
