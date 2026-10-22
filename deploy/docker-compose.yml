@@ -149,9 +149,96 @@ services:
       timeout: 5s
       retries: 12
 
+  # ---- Go services (dev profile: air hot-reload, source mounted) ----
+
+  order:
+    build:
+      context: ../services/order
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    container_name: order-flow-order
+    environment:
+      SERVICE_NAME: order
+      KAFKA_BOOTSTRAP: kafka:29092
+      ORDER_DB_DSN: postgres://order:order@order-db:5432/order?sslmode=disable
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    ports:
+      - "8082:8080"
+    volumes:
+      - ../services/order:/app
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      kafka:
+        condition: service_healthy
+      order-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  inventory:
+    build:
+      context: ../services/inventory
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    container_name: order-flow-inventory
+    environment:
+      SERVICE_NAME: inventory
+      KAFKA_BOOTSTRAP: kafka:29092
+      INVENTORY_DB_DSN: postgres://inventory:inventory@inventory-db:5432/inventory?sslmode=disable
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    ports:
+      - "8083:8080"
+    volumes:
+      - ../services/inventory:/app
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      kafka:
+        condition: service_healthy
+      inventory-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  payment:
+    build:
+      context: ../services/payment
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    container_name: order-flow-payment
+    environment:
+      SERVICE_NAME: payment
+      KAFKA_BOOTSTRAP: kafka:29092
+      PAYMENT_DB_DSN: postgres://payment:payment@payment-db:5432/payment?sslmode=disable
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    ports:
+      - "8084:8080"
+    volumes:
+      - ../services/payment:/app
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      kafka:
+        condition: service_healthy
+      payment-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
 volumes:
   kafka-data:
   order-db-data:
   inventory-db-data:
   payment-db-data:
   rabbit-data:
+  go-mod-cache:

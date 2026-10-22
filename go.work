@@ -1,0 +1,7 @@
+go 1.23
+
+use (
+	./services/inventory
+	./services/order
+	./services/payment
+)

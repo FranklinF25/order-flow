@@ -9,6 +9,7 @@ docs/
 
 # Go
 bin/
+tmp/
 *.exe
 *.test
 *.out
