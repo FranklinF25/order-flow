@@ -11,7 +11,7 @@ BROKER=localhost:9092
 cmd="${1:-help}"
 case "$cmd" in
   up)      $COMPOSE up -d ;;
-  down)    $COMPOSE down ;;
+  down)    $COMPOSE --profile dev down ;;
   ps)      $COMPOSE ps ;;
   logs)    $COMPOSE logs -f --tail=100 ;;
   dev)     $COMPOSE --profile dev up -d --build --wait ;;
@@ -23,6 +23,6 @@ case "$cmd" in
     ;;
   subjects) curl -s http://localhost:8081/subjects | sort ;;
   schemas) ./scripts/register-schemas.sh ;;
-  clean)   $COMPOSE down -v ;;
+  clean)   $COMPOSE --profile dev down -v ;;
   *) echo "usage: scripts/dev.sh {up|down|ps|logs|dev|topics|subjects|clean}" ;;
 esac

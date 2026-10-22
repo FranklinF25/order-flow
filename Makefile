@@ -16,7 +16,7 @@ schemas:
 	./scripts/register-schemas.sh
 
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile dev down
 
 ps:
 	$(COMPOSE) ps
@@ -36,7 +36,7 @@ subjects:
 	@curl -s $(SR)/subjects | sort
 
 clean:
-	$(COMPOSE) down -v
+	$(COMPOSE) --profile dev down -v
 
 # Dev loop (Docker-only rule): Go services run as compose containers
 # (profile "dev", air hot-reload, source mounted) — never on the host.
