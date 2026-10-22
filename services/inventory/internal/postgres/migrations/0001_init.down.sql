@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS processed_events;
+DROP TABLE IF EXISTS outbox;
+DROP TABLE IF EXISTS reservations;
+DROP TABLE IF EXISTS stock;
