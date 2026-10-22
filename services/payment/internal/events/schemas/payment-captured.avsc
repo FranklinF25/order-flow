@@ -1,0 +1,12 @@
+{
+  "type": "record",
+  "name": "PaymentCaptured",
+  "namespace": "orderflow.payment",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "payment_id", "type": "string"},
+    {"name": "amount_cents", "type": "long"}
+  ]
+}
