@@ -16,6 +16,9 @@ services:
       KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # Kafka must write to the mounted volume: the image default
+      # (/tmp/kraft-combined-logs) lives in the container layer and is lost on recreate
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
       # Single-broker cluster: internal topics must have RF=1 or the controller
       # refuses creation and consumer joins hang forever
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
