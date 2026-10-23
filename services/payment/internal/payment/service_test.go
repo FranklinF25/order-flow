@@ -73,24 +73,28 @@ func (f *fakeTx) WithinTx(ctx context.Context, fn func(context.Context, Store) e
 	return nil
 }
 
-// fakeGateway records capture attempts and returns a fixed payment id.
+// fakeGateway records capture attempts and returns a fixed payment id. It
+// stands in for an always-capturing gateway; declined charges are exercised
+// through the real SimulatedGateway, gateway outages through fail.
 type fakeGateway struct {
-	fail     bool
-	orderIDs []string
-	amounts  []int64
+	fail        bool
+	orderIDs    []string
+	amounts     []int64
+	customerIDs []string
 }
 
-func (f *fakeGateway) Capture(_ context.Context, orderID string, amountCents int64) (string, error) {
+func (f *fakeGateway) Capture(_ context.Context, orderID string, amountCents int64, customerID string) (string, error) {
 	if f.fail {
 		return "", errors.New("gateway down")
 	}
 	f.orderIDs = append(f.orderIDs, orderID)
 	f.amounts = append(f.amounts, amountCents)
+	f.customerIDs = append(f.customerIDs, customerID)
 	return "pay-fixed-1", nil
 }
 
-// fakeEncoder stands in for the Avro driven adapter; the payload carries the
-// amount so tests can assert what would travel on the wire.
+// fakeEncoder stands in for the Avro driven adapter; payloads carry what
+// would travel on the wire so tests can assert the facts' content.
 type fakeEncoder struct{}
 
 func (fakeEncoder) PaymentCaptured(p Payment) (OutboxEvent, error) {
@@ -102,7 +106,138 @@ func (fakeEncoder) PaymentCaptured(p Payment) (OutboxEvent, error) {
 	}, nil
 }
 
-var captureInput = CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998}
+func (fakeEncoder) PaymentFailed(orderID string, amountCents int64, reason FailureReason) (OutboxEvent, error) {
+	return OutboxEvent{
+		EventID:     "evt-failed-" + orderID,
+		RecordType:  "orderflow.payment.PaymentFailed",
+		AggregateID: orderID,
+		Payload:     []byte(string(reason) + ":" + strconv.FormatInt(amountCents, 10)),
+	}, nil
+}
+
+var captureInput = CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998, CustomerID: "cus-ok-1"}
+
+// TestCaptureDeclinedMarkerPersistsFailedPaymentAndOutbox proves the M2 fail
+// path (S1/S3): a marker customer reaches the gateway, comes back declined,
+// and ONE transaction persists the processed-event guard, the FAILED payment
+// row (amount from StockReserved.total_cents) and the PaymentFailed fact —
+// with NO PaymentCaptured emitted.
+func TestCaptureDeclinedMarkerPersistsFailedPaymentAndOutbox(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
+
+	in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998, CustomerID: "decline@x.com"}
+	if err := svc.Capture(context.Background(), in); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	p := store.payments["ord-1"]
+	if p == nil {
+		t.Fatal("FAILED payment not persisted")
+	}
+	if p.Status != StatusFailed || p.AmountCents != 4998 {
+		t.Errorf("payment = %+v, want FAILED/4998", p)
+	}
+	if !store.processed["evt-stock-1"] {
+		t.Error("processed event guard not persisted")
+	}
+	if len(store.outbox) != 1 {
+		t.Fatalf("outbox events = %d, want 1 PaymentFailed", len(store.outbox))
+	}
+	ev := store.outbox[0]
+	if ev.RecordType != "orderflow.payment.PaymentFailed" {
+		t.Errorf("record type = %q, want orderflow.payment.PaymentFailed", ev.RecordType)
+	}
+	if ev.AggregateID != "ord-1" {
+		t.Errorf("aggregate = %q, want order id", ev.AggregateID)
+	}
+	if string(ev.Payload) != "CARD_DECLINED:4998" {
+		t.Errorf("payload = %q, want reason CARD_DECLINED with amount 4998", ev.Payload)
+	}
+}
+
+// TestCaptureMarkerReasonsReachPaymentFailed proves all three marker reasons
+// survive the whole app service (real gateway adapter → PaymentFailed fact),
+// including case-insensitivity of the marker.
+func TestCaptureMarkerReasonsReachPaymentFailed(t *testing.T) {
+	cases := []struct {
+		name, customerID string
+		wantReason       FailureReason
+	}{
+		{"decline", "decline@x.com", ReasonCardDeclined},
+		{"insufficient, uppercase", "INSUFFICIENT@x.com", ReasonInsufficientFunds},
+		{"gateway error", "ERROR-x", ReasonGatewayError},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeStore()
+			svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
+			in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 2500, CustomerID: tc.customerID}
+			if err := svc.Capture(context.Background(), in); err != nil {
+				t.Fatalf("Capture: %v", err)
+			}
+			if p := store.payments["ord-1"]; p == nil || p.Status != StatusFailed {
+				t.Fatalf("payment = %+v, want FAILED", p)
+			}
+			if len(store.outbox) != 1 {
+				t.Fatalf("outbox events = %d, want 1", len(store.outbox))
+			}
+			if got := string(store.outbox[0].Payload); got != string(tc.wantReason)+":2500" {
+				t.Errorf("payload = %q, want %s:2500", got, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestCaptureReplayedDeclinedEventIsNoOp proves idempotency on the fail path:
+// a replayed StockReserved (same event id) and a second decline under a new
+// event id both absorb against the guard/UNIQUE constraints — one payment row,
+// one outbox row.
+func TestCaptureReplayedDeclinedEventIsNoOp(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
+
+	ctx := context.Background()
+	in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998, CustomerID: "decline@x.com"}
+	if err := svc.Capture(ctx, in); err != nil {
+		t.Fatalf("first Capture: %v", err)
+	}
+	if err := svc.Capture(ctx, in); err != nil {
+		t.Fatalf("replayed Capture: %v", err)
+	}
+	second := in
+	second.EventID = "evt-stock-2"
+	if err := svc.Capture(ctx, second); err != nil {
+		t.Fatalf("second-event Capture: %v", err)
+	}
+	if len(store.payments) != 1 {
+		t.Errorf("payments = %d, want 1", len(store.payments))
+	}
+	if len(store.outbox) != 1 {
+		t.Errorf("outbox events = %d, want 1 (no duplicate PaymentFailed)", len(store.outbox))
+	}
+}
+
+// TestCapturePlainCustomerStillCaptures proves the success path is unchanged
+// for non-marker customers and that the customer id reaches the gateway port.
+func TestCapturePlainCustomerStillCaptures(t *testing.T) {
+	store := newFakeStore()
+	gw := &fakeGateway{}
+	svc := NewService(&fakeTx{store}, gw, fakeEncoder{})
+
+	if err := svc.Capture(context.Background(), captureInput); err != nil {
+		t.Fatalf("Capture: %v", err)
+	}
+	p := store.payments["ord-1"]
+	if p == nil || p.Status != StatusCaptured {
+		t.Fatalf("payment = %+v, want CAPTURED", p)
+	}
+	if len(store.outbox) != 1 || store.outbox[0].RecordType != "orderflow.payment.PaymentCaptured" {
+		t.Errorf("outbox = %+v, want one PaymentCaptured", store.outbox)
+	}
+	if len(gw.customerIDs) != 1 || gw.customerIDs[0] != "cus-ok-1" {
+		t.Errorf("gateway customer ids = %v, want [cus-ok-1]", gw.customerIDs)
+	}
+}
 
 func TestCapturePersistsPaymentGuardAndOutboxEvent(t *testing.T) {
 	store := newFakeStore()

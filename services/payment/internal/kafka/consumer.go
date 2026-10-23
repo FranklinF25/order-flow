@@ -109,6 +109,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
 		EventID:     evt.EventID,
 		OrderID:     evt.OrderID,
 		AmountCents: evt.TotalCents, // the v2 charge amount (topology §5)
+		CustomerID:  evt.CustomerID, // the v3 failure marker for the simulated gateway (M2, S3)
 	})
 }
 

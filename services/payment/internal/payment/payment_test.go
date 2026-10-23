@@ -15,6 +15,19 @@ func TestNewPaymentCapturesTerminalStatus(t *testing.T) {
 	}
 }
 
+func TestNewFailedPaymentMarksTerminalFailure(t *testing.T) {
+	p, err := NewFailedPayment("pay-f-1", "ord-1", 4998)
+	if err != nil {
+		t.Fatalf("NewFailedPayment: %v", err)
+	}
+	if p.Status != StatusFailed {
+		t.Errorf("status = %q, want FAILED", p.Status)
+	}
+	if p.ID != "pay-f-1" || p.OrderID != "ord-1" || p.AmountCents != 4998 {
+		t.Errorf("payment = %+v, want id/order/amount copied", p)
+	}
+}
+
 func TestNewPaymentValidation(t *testing.T) {
 	cases := []struct {
 		name        string

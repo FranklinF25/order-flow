@@ -37,6 +37,7 @@ func main() {
 		log.Fatalf("serde: %v", err)
 	}
 	mustEnsureSchema(ctx, serde, events.PaymentCapturedType, "payment-captured")
+	mustEnsureSchema(ctx, serde, events.PaymentFailedType, "payment-failed")
 
 	relay, err := paymentkafka.NewRelay(brokers, "payment.events", store, serde)
 	if err != nil {

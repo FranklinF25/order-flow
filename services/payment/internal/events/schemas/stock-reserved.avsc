@@ -17,6 +17,7 @@
         ]
       }
     }},
-    {"name": "total_cents", "type": "long", "default": 0, "doc": "Echo of OrderPlaced.total_cents so payment can charge without another subscription (v2, additive with default)"}
+    {"name": "total_cents", "type": "long", "default": 0, "doc": "Echo of OrderPlaced.total_cents so payment can charge without another subscription (v2, additive with default)"},
+    {"name": "customer_id", "type": "string", "default": "", "doc": "Echo of OrderPlaced.customer_id so the simulated payment gateway can evaluate the failure marker through payment's only subscription (v3, additive with default; M2)"}
   ]
 }

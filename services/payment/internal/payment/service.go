@@ -34,22 +34,27 @@ type Tx interface {
 
 // Gateway is the payment gateway port (driven; injectable like order's EventEncoder).
 type Gateway interface {
-	// Capture charges amountCents for orderID and returns the gateway payment id.
-	Capture(ctx context.Context, orderID string, amountCents int64) (paymentID string, err error)
+	// Capture charges amountCents for orderID. customerID carries the M2
+	// failure marker; a deterministic simulated rejection comes back as a
+	// *DeclineError naming the FailureReason, an outage as an ordinary error.
+	Capture(ctx context.Context, orderID string, amountCents int64, customerID string) (paymentID string, err error)
 }
 
-// EventEncoder turns captured payments into outbox events (driven port; the
+// EventEncoder turns payment facts into outbox events (driven port; the
 // kafka adapter implements it with Avro).
 type EventEncoder interface {
 	PaymentCaptured(p Payment) (OutboxEvent, error)
+	PaymentFailed(orderID string, amountCents int64, reason FailureReason) (OutboxEvent, error)
 }
 
 // CaptureInput carries the StockReserved fields payment reacts to (topology §5:
-// the charge amount is StockReserved.total_cents).
+// the charge amount is StockReserved.total_cents; customer_id is the v3 echo
+// that feeds the failure marker).
 type CaptureInput struct {
 	EventID     string
 	OrderID     string
 	AmountCents int64
+	CustomerID  string
 }
 
 // Service is the payment application service.
@@ -64,12 +69,15 @@ func NewService(tx Tx, gw Gateway, enc EventEncoder) *Service {
 	return &Service{tx: tx, gw: gw, enc: enc}
 }
 
-// Capture charges the gateway and persists the CAPTURED payment, the
-// processed-event guard and the PaymentCaptured fact in ONE transaction
-// (topology §6/§7). The gateway runs first because its payment id feeds the
-// row and the fact; a failure there persists nothing. Redelivery never
+// Capture runs the simulated charge and persists the outcome in ONE
+// transaction (topology §6/§7): the processed-event guard, the payments row
+// and the fact — PaymentCaptured when the gateway captures, or a FAILED row
+// plus PaymentFailed (failure_reason, amount_cents) when it declines on the
+// customer_id marker. The gateway runs first because its verdict feeds the
+// row and the fact; an outage error persists nothing. Redelivery never
 // double-charges the ledger: the processed_events guard skips duplicate
-// event ids and the order_id UNIQUE constraint makes a second capture a no-op.
+// event ids and the order_id UNIQUE constraint makes a second write for the
+// same order a no-op — on both the capture and the decline path.
 func (s *Service) Capture(ctx context.Context, in CaptureInput) error {
 	if in.EventID == "" {
 		return errors.New("event id is required")
@@ -77,7 +85,11 @@ func (s *Service) Capture(ctx context.Context, in CaptureInput) error {
 	if in.OrderID == "" {
 		return errors.New("order id is required")
 	}
-	paymentID, err := s.gw.Capture(ctx, in.OrderID, in.AmountCents)
+	paymentID, err := s.gw.Capture(ctx, in.OrderID, in.AmountCents, in.CustomerID)
+	var declined *DeclineError
+	if errors.As(err, &declined) {
+		return s.fail(ctx, in, declined.Reason)
+	}
 	if err != nil {
 		return fmt.Errorf("gateway capture: %w", err)
 	}
@@ -103,6 +115,43 @@ func (s *Service) Capture(ctx context.Context, in CaptureInput) error {
 		}
 		if !inserted {
 			return nil // second capture for the same order: unique order_id no-op
+		}
+		return st.AppendOutbox(ctx, ev)
+	})
+}
+
+// fail persists a marker decline in ONE transaction: the processed-event
+// guard, the FAILED payments row (amount from StockReserved.total_cents,
+// order_id UNIQUE as the idempotency real guard) and the PaymentFailed fact
+// that triggers compensation B (order cancel + inventory release). It mirrors
+// the capture path's guards so a replayed StockReserved absorbs as a no-op.
+func (s *Service) fail(ctx context.Context, in CaptureInput, reason FailureReason) error {
+	id, err := NewUUID()
+	if err != nil {
+		return err
+	}
+	p, err := NewFailedPayment(id, in.OrderID, in.AmountCents)
+	if err != nil {
+		return err
+	}
+	ev, err := s.enc.PaymentFailed(in.OrderID, in.AmountCents, reason)
+	if err != nil {
+		return err
+	}
+	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		fresh, err := st.AppendProcessedEvent(ctx, in.EventID)
+		if err != nil {
+			return err
+		}
+		if !fresh {
+			return nil // duplicate StockReserved event: idempotent skip, nothing written
+		}
+		inserted, err := st.SavePayment(ctx, &p)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return nil // a payment for this order already exists: unique order_id no-op
 		}
 		return st.AppendOutbox(ctx, ev)
 	})

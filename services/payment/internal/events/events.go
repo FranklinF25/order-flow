@@ -22,6 +22,7 @@ var schemasFS embed.FS
 const (
 	StockReservedType   = "orderflow.inventory.StockReserved" // consumed from inventory.events
 	PaymentCapturedType = "orderflow.payment.PaymentCaptured" // produced to payment.events
+	PaymentFailedType   = "orderflow.payment.PaymentFailed"   // produced to payment.events (compensation B)
 )
 
 // StockItem is the wire shape of a reserved line inside StockReserved.
@@ -30,14 +31,17 @@ type StockItem struct {
 	Qty int    `avro:"qty"`
 }
 
-// StockReserved (v2) is consumed from inventory.events; payment charges
-// TotalCents (the v2 additive echo of OrderPlaced.total_cents, topology §5).
+// StockReserved (v3) is consumed from inventory.events; payment charges
+// TotalCents (the v2 additive echo of OrderPlaced.total_cents, topology §5)
+// and reads CustomerID (the v3 additive echo of OrderPlaced.customer_id) as
+// the simulated gateway's failure marker (M2, S3).
 type StockReserved struct {
 	EventID    string      `avro:"event_id"`
 	OrderID    string      `avro:"order_id"`
 	OccurredAt string      `avro:"occurred_at"`
 	Items      []StockItem `avro:"items"`
 	TotalCents int64       `avro:"total_cents"`
+	CustomerID string      `avro:"customer_id"`
 }
 
 // PaymentCaptured is emitted when the simulated capture succeeds.
@@ -47,6 +51,16 @@ type PaymentCaptured struct {
 	OccurredAt  string `avro:"occurred_at"`
 	PaymentID   string `avro:"payment_id"`
 	AmountCents int64  `avro:"amount_cents"`
+}
+
+// PaymentFailed is emitted when the marker-driven simulated gateway rejects
+// the charge (compensation B trigger, topology §6).
+type PaymentFailed struct {
+	EventID       string `avro:"event_id"`
+	OrderID       string `avro:"order_id"`
+	OccurredAt    string `avro:"occurred_at"`
+	AmountCents   int64  `avro:"amount_cents"`
+	FailureReason string `avro:"failure_reason"`
 }
 
 var (
@@ -112,13 +126,42 @@ func (Encoder) PaymentCaptured(p payment.Payment) (payment.OutboxEvent, error) {
 	}, nil
 }
 
+// PaymentFailed encodes the fact of the same name (compensation B trigger).
+func (Encoder) PaymentFailed(orderID string, amountCents int64, reason payment.FailureReason) (payment.OutboxEvent, error) {
+	id, err := payment.NewUUID()
+	if err != nil {
+		return payment.OutboxEvent{}, err
+	}
+	c, err := codec("payment-failed")
+	if err != nil {
+		return payment.OutboxEvent{}, err
+	}
+	payload, err := avro.Marshal(c, PaymentFailed{
+		EventID:       id,
+		OrderID:       orderID,
+		OccurredAt:    time.Now().UTC().Format(time.RFC3339),
+		AmountCents:   amountCents,
+		FailureReason: string(reason),
+	})
+	if err != nil {
+		return payment.OutboxEvent{}, fmt.Errorf("marshal PaymentFailed: %w", err)
+	}
+	return payment.OutboxEvent{
+		EventID:     id,
+		RecordType:  PaymentFailedType,
+		AggregateID: orderID,
+		Payload:     payload,
+	}, nil
+}
+
 // Decoder translates incoming wire records into domain inputs (driven adapter).
 //
 // Consume choice: strip the 5-byte Confluent header (magic byte + int32
-// big-endian schema id) and decode the rest with the EMBEDDED StockReserved v2
-// schema. In M1 the registry subject holds exactly this schema (idempotent
-// CreateSchema at boot), so the id carries no information we need to decode;
-// resolving arbitrary runtime schema ids arrives with schema CI (M4).
+// big-endian schema id) and decode the rest with the EMBEDDED StockReserved v3
+// schema. The registry subject holds versions [1,2,3] under BACKWARD_TRANSITIVE
+// (L5/L3 additive precedent), so every wire version decodes against this reader
+// — customer_id defaults to "" for v1/v2 records; resolving arbitrary runtime
+// schema ids arrives with schema CI (M4).
 type Decoder struct{}
 
 // NewDecoder builds the Avro decoder.
