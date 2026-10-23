@@ -62,6 +62,7 @@ func main() {
 	// payment services own those subjects).
 	mustEnsureSchema(ctx, serde, events.StockReservedType, "stock-reserved")
 	mustEnsureSchema(ctx, serde, events.StockUnavailableType, "stock-unavailable")
+	mustEnsureSchema(ctx, serde, events.StockReleasedType, "stock-released")
 
 	relay, err := inventorykafka.NewRelay(brokers, "inventory.events", store, serde)
 	if err != nil {
