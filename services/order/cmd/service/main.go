@@ -17,6 +17,7 @@ import (
 	orderkafka "github.com/FranklinF25/order-flow/services/order/internal/kafka"
 	"github.com/FranklinF25/order-flow/services/order/internal/order"
 	"github.com/FranklinF25/order-flow/services/order/internal/postgres"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -24,6 +25,27 @@ func main() {
 	dsn := envOr("ORDER_DB_DSN", "postgres://order:order@localhost:5432/order?sslmode=disable")
 	brokers := strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",")
 	srURL := envOr("SCHEMA_REGISTRY_URL", "http://localhost:8081")
+
+	// Redis idempotency fast-gate (topology §7, first gate): empty/unset
+	// REDIS_URL disables it (the DB processed_events guard stays the real
+	// gate); a malformed URL fails fast. Short timeouts keep the gate
+	// best-effort — an unavailable Redis degrades to the normal handler
+	// path instead of stalling consumption.
+	var rdb *redis.Client
+	if envOr("REDIS_URL", "") == "" {
+		log.Printf("redis fast-gate disabled")
+	} else {
+		opts, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+		if err != nil {
+			log.Fatalf("redis fast-gate: %v", err)
+		}
+		opts.DialTimeout = 2 * time.Second
+		opts.ReadTimeout = time.Second
+		opts.WriteTimeout = time.Second
+		opts.MaxRetries = 1
+		rdb = redis.NewClient(opts)
+		log.Printf("redis fast-gate enabled")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -51,14 +73,18 @@ func main() {
 	// (StockReserved + StockUnavailable) and payment.events (PaymentCaptured +
 	// PaymentFailed), each stream in its own consumer group.
 	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events",
-		orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc)))
+		orderkafka.WithFastGate(
+			orderkafka.NewRedisGate(rdb, "order.inventory-events"),
+			orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc))))
 	if err != nil {
 		log.Fatalf("inventory consumer: %v", err)
 	}
 	go invConsumer.Run(ctx)
 
 	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events",
-		orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc)))
+		orderkafka.WithFastGate(
+			orderkafka.NewRedisGate(rdb, "order.payment-events"),
+			orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc))))
 	if err != nil {
 		log.Fatalf("payment consumer: %v", err)
 	}

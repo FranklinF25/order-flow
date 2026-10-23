@@ -18,6 +18,7 @@ import (
 	paymentkafka "github.com/FranklinF25/order-flow/services/payment/internal/kafka"
 	"github.com/FranklinF25/order-flow/services/payment/internal/payment"
 	"github.com/FranklinF25/order-flow/services/payment/internal/postgres"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -25,6 +26,27 @@ func main() {
 	dsn := envOr("PAYMENT_DB_DSN", "postgres://payment:payment@localhost:5432/payment?sslmode=disable")
 	brokers := strings.Split(envOr("KAFKA_BOOTSTRAP", "localhost:9092"), ",")
 	srURL := envOr("SCHEMA_REGISTRY_URL", "http://localhost:8081")
+
+	// Redis idempotency fast-gate (topology §7, first gate): empty/unset
+	// REDIS_URL disables it (the DB processed_events guard stays the real
+	// gate); a malformed URL fails fast. Short timeouts keep the gate
+	// best-effort — an unavailable Redis degrades to the normal handler
+	// path instead of stalling consumption.
+	var rdb *redis.Client
+	if envOr("REDIS_URL", "") == "" {
+		log.Printf("redis fast-gate disabled")
+	} else {
+		opts, err := redis.ParseURL(os.Getenv("REDIS_URL"))
+		if err != nil {
+			log.Fatalf("redis fast-gate: %v", err)
+		}
+		opts.DialTimeout = 2 * time.Second
+		opts.ReadTimeout = time.Second
+		opts.WriteTimeout = time.Second
+		opts.MaxRetries = 1
+		rdb = redis.NewClient(opts)
+		log.Printf("redis fast-gate enabled")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -47,7 +69,8 @@ func main() {
 
 	svc := payment.NewService(store, payment.NewSimulatedGateway(), events.NewEncoder())
 
-	consumer, err := paymentkafka.NewConsumer(brokers, svc, events.NewDecoder())
+	consumer, err := paymentkafka.NewConsumer(brokers, svc, events.NewDecoder(),
+		paymentkafka.NewRedisGate(rdb, "payment.inventory-events"))
 	if err != nil {
 		log.Fatalf("consumer: %v", err)
 	}

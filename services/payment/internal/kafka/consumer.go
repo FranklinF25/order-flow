@@ -23,13 +23,15 @@ const (
 
 // Consumer is the driving adapter that reacts to StockReserved facts.
 type Consumer struct {
-	client *kgo.Client
-	svc    *payment.Service
-	dec    *events.Decoder
+	client  *kgo.Client
+	svc     *payment.Service
+	dec     *events.Decoder
+	handler Handler // handleWithRetry wrapped with the Redis fast-gate (nil gate → unchanged)
 }
 
-// NewConsumer builds the inventory.events group consumer.
-func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder) (*Consumer, error) {
+// NewConsumer builds the inventory.events group consumer. gate may be nil
+// (REDIS_URL unset): the fast-gate is disabled and records dispatch as before.
+func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder, gate FastGate) (*Consumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(consumerGroup),
@@ -42,7 +44,14 @@ func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder) (*
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &Consumer{client: cl, svc: svc, dec: dec}, nil
+	c := &Consumer{client: cl, svc: svc, dec: dec}
+	// Fast-gate outside the retry loop (topology §7 first gate): a hit
+	// absorbs before any attempt and the offset commits; a check error
+	// degrades into the normal retried path; Mark runs only after the final
+	// success — the tx has committed by then (Capture's processed_events
+	// guard is the real gate).
+	c.handler = WithFastGate(gate, c.handleWithRetry)
+	return c, nil
 }
 
 // Run polls until ctx is cancelled. One record per poll keeps handle→commit
@@ -60,7 +69,7 @@ func (c *Consumer) Run(ctx context.Context) {
 			}
 		})
 		fetches.EachRecord(func(rec *kgo.Record) {
-			if err := c.handleWithRetry(ctx, rec); err != nil {
+			if err := c.handler(ctx, rec); err != nil {
 				// No commit: the group position stays behind, so the record
 				// redelivers after restart/rebalance. M2 replaces this with
 				// the DLQ per topology §7 (3 retries already applied here).

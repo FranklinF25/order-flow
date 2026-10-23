@@ -25,12 +25,14 @@ import (
 // retries/DLQ yet: on a handler error the consumer stops uncommitted, so the
 // record is redelivered on the next start.
 type PaymentConsumer struct {
-	client *kgo.Client
-	svc    *inventory.Service
+	client  *kgo.Client
+	svc     *inventory.Service
+	handler Handler // c.handle wrapped with the Redis fast-gate (nil gate → unchanged)
 }
 
-// NewPaymentConsumer builds the payment.events consumer.
-func NewPaymentConsumer(brokers []string, topic, group string, svc *inventory.Service) (*PaymentConsumer, error) {
+// NewPaymentConsumer builds the payment.events consumer. gate may be nil
+// (REDIS_URL unset): the fast-gate is disabled and records dispatch as before.
+func NewPaymentConsumer(brokers []string, topic, group string, svc *inventory.Service, gate FastGate) (*PaymentConsumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
@@ -44,7 +46,11 @@ func NewPaymentConsumer(brokers []string, topic, group string, svc *inventory.Se
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &PaymentConsumer{client: cl, svc: svc}, nil
+	c := &PaymentConsumer{client: cl, svc: svc}
+	// Fast-gate before dispatch (topology §7 first gate); absorb-on-hit
+	// returns nil, so the offset commits exactly like the absorbed no-op path.
+	c.handler = WithFastGate(gate, c.handle)
+	return c, nil
 }
 
 // Run polls until ctx is cancelled or a handler fails (no retry/DLQ in M2 yet).
@@ -61,7 +67,7 @@ func (c *PaymentConsumer) Run(ctx context.Context) {
 			if ctx.Err() != nil {
 				break
 			}
-			if err := c.handle(ctx, rec); err != nil {
+			if err := c.handler(ctx, rec); err != nil {
 				log.Printf("payment consumer stopped on %s[%d] offset %d: %v (no retry/DLQ yet)", rec.Topic, rec.Partition, rec.Offset, err)
 				c.client.Close()
 				return
