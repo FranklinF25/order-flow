@@ -7,12 +7,18 @@ import (
 
 func TestNewReservationValid(t *testing.T) {
 	items := []Item{{SKU: "SKU-A", Qty: 2}, {SKU: "SKU-B", Qty: 1}}
-	r, err := NewReservation("ord-1", 3000, items)
+	r, err := NewReservation("ord-1", "cus-1", 3000, items)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if r.OrderID != "ord-1" || r.TotalCents != 3000 {
 		t.Errorf("reservation = %q/%d, want ord-1/3000", r.OrderID, r.TotalCents)
+	}
+	if r.CustomerID != "cus-1" {
+		t.Errorf("customer id = %q, want cus-1 (v3 echo)", r.CustomerID)
+	}
+	if r.Status != StatusReserved {
+		t.Errorf("status = %s, want %s", r.Status, StatusReserved)
 	}
 	if len(r.Items) != 2 {
 		t.Fatalf("items = %d, want 2", len(r.Items))
@@ -44,11 +50,45 @@ func TestNewReservationValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewReservation(tc.orderID, tc.total, tc.items); err == nil {
+			if _, err := NewReservation(tc.orderID, "cus-1", tc.total, tc.items); err == nil {
 				t.Fatal("expected validation error, got nil")
 			}
 		})
 	}
+}
+
+func TestReservationRelease(t *testing.T) {
+	t.Run("RESERVED transitions to RELEASED", func(t *testing.T) {
+		r, err := NewReservation("ord-1", "cus-1", 3000, []Item{{SKU: "SKU-A", Qty: 2}})
+		if err != nil {
+			t.Fatalf("NewReservation: %v", err)
+		}
+		if err := r.Release(); err != nil {
+			t.Fatalf("Release: %v", err)
+		}
+		if r.Status != StatusReleased {
+			t.Errorf("status = %s, want %s", r.Status, StatusReleased)
+		}
+	})
+	t.Run("RELEASED refuses a second release", func(t *testing.T) {
+		r, err := NewReservation("ord-1", "cus-1", 3000, []Item{{SKU: "SKU-A", Qty: 2}})
+		if err != nil {
+			t.Fatalf("NewReservation: %v", err)
+		}
+		if err := r.Release(); err != nil {
+			t.Fatalf("first Release: %v", err)
+		}
+		err = r.Release()
+		if err == nil {
+			t.Fatal("expected error on second release, got nil")
+		}
+		if !errors.Is(err, ErrAlreadyReleased) {
+			t.Fatalf("error %v is not ErrAlreadyReleased", err)
+		}
+		if r.Status != StatusReleased {
+			t.Errorf("status = %s, want unchanged %s", r.Status, StatusReleased)
+		}
+	})
 }
 
 func TestStockReserve(t *testing.T) {

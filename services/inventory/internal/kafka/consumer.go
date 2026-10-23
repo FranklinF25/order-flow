@@ -96,6 +96,7 @@ func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
 	_, err = c.svc.HandleOrderPlaced(ctx, inventory.ReserveInput{
 		EventID:    ev.EventID,
 		OrderID:    ev.OrderID,
+		CustomerID: ev.CustomerID, // v3 echo: payment evaluates its marker downstream
 		TotalCents: ev.TotalCents,
 		Items:      items,
 	})

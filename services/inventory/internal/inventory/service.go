@@ -22,6 +22,9 @@ var (
 	// ErrStockNotFound is returned by Store.GetStock for unknown SKUs
 	// (treated as zero availability, i.e. a shortage).
 	ErrStockNotFound = errors.New("stock not found")
+	// ErrReservationNotFound is returned by Store.GetReservation for an order
+	// without a reservation (nothing to release: absorb the compensation).
+	ErrReservationNotFound = errors.New("reservation not found")
 )
 
 // Store is the persistence port (consumer-side; implemented by the postgres adapter).
@@ -32,6 +35,12 @@ type Store interface {
 	DecrementStock(ctx context.Context, sku string, qty int) error
 	SaveReservation(ctx context.Context, r Reservation) error
 	AppendOutbox(ctx context.Context, e OutboxEvent) error
+	GetReservation(ctx context.Context, orderID string) (*Reservation, error)
+	// ReleaseReservation flips the reservation RESERVED→RELEASED and reports
+	// whether THIS transaction took the transition (SQL WHERE status =
+	// 'RESERVED' is the concurrency backstop on the state machine).
+	ReleaseReservation(ctx context.Context, orderID string) (bool, error)
+	IncrementStock(ctx context.Context, sku string, qty int) error
 }
 
 // Tx runs a unit of work atomically: the Store handed to fn is scoped to one
@@ -46,14 +55,24 @@ type Tx interface {
 type EventEncoder interface {
 	StockReserved(r Reservation) (OutboxEvent, error)
 	StockUnavailable(orderID string, shortages []Shortage) (OutboxEvent, error)
+	StockReleased(orderID string, items []Item) (OutboxEvent, error)
 }
 
 // ReserveInput is the driving command translated from the OrderPlaced fact.
 type ReserveInput struct {
 	EventID    string
 	OrderID    string
+	CustomerID string
 	TotalCents int64
 	Items      []Item
+}
+
+// ReleaseInput is the driving command translated from the PaymentFailed fact
+// (compensation B). The payment payload carries no lines — the stored
+// reservation is the source of truth for what to restore.
+type ReleaseInput struct {
+	EventID string
+	OrderID string
 }
 
 // Service is the inventory application service.
@@ -76,7 +95,7 @@ func NewService(tx Tx, reads Store, enc EventEncoder) *Service {
 // StockReserved (with the echoed total_cents) queued. applied reports whether
 // the event was applied; a duplicate returns (false, nil).
 func (s *Service) HandleOrderPlaced(ctx context.Context, in ReserveInput) (bool, error) {
-	r, err := NewReservation(in.OrderID, in.TotalCents, in.Items)
+	r, err := NewReservation(in.OrderID, in.CustomerID, in.TotalCents, in.Items)
 	if err != nil {
 		return false, err
 	}
@@ -140,6 +159,59 @@ func (s *Service) HandleOrderPlaced(ctx context.Context, in ReserveInput) (bool,
 // ListStock exposes the read side for the REST adapter.
 func (s *Service) ListStock(ctx context.Context) ([]Stock, error) {
 	return s.reads.ListStock(ctx)
+}
+
+// HandlePaymentFailed releases an order's reservation as compensation B, in
+// one transaction: the processed_events guard runs first (a replayed
+// PaymentFailed is an absorbed no-op), then the reservation state machine
+// RESERVED→RELEASED is taken exactly once — the conditional
+// ReleaseReservation is the concurrency backstop. Stock quantities are
+// restored per stored reservation line and StockReleased is queued ONLY when
+// this transaction took the transition. Absorbed cases (duplicate event,
+// unknown order, already RELEASED) return (false, nil): the caller commits
+// the offset without error and without side effects.
+func (s *Service) HandlePaymentFailed(ctx context.Context, in ReleaseInput) (bool, error) {
+	var applied bool
+	err := s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		if err := st.MarkProcessed(ctx, in.EventID); err != nil {
+			if errors.Is(err, ErrDuplicateEvent) {
+				return nil // replayed PaymentFailed: absorb, commit the no-op tx
+			}
+			return err
+		}
+		r, err := st.GetReservation(ctx, in.OrderID)
+		if errors.Is(err, ErrReservationNotFound) {
+			return nil // nothing to release (never reserved, or shortage path): absorb
+		}
+		if err != nil {
+			return err
+		}
+		if err := r.Release(); err != nil {
+			return nil // already RELEASED: absorb — no restore, no re-emit
+		}
+		transitioned, err := st.ReleaseReservation(ctx, in.OrderID)
+		if err != nil {
+			return err
+		}
+		if !transitioned {
+			return nil // a concurrent tx already took RESERVED→RELEASED: absorb
+		}
+		for _, it := range r.Items {
+			if err := st.IncrementStock(ctx, it.SKU, it.Qty); err != nil {
+				return err
+			}
+		}
+		ev, err := s.enc.StockReleased(r.OrderID, r.Items)
+		if err != nil {
+			return err
+		}
+		applied = true
+		return st.AppendOutbox(ctx, ev)
+	})
+	if err != nil {
+		return false, err
+	}
+	return applied, nil
 }
 
 // NewUUID returns a random RFC 4122 v4 UUID string (stdlib only).

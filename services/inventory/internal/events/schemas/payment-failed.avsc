@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "PaymentFailed",
+  "namespace": "orderflow.payment",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "amount_cents", "type": "long"},
+    {"name": "failure_reason", "type": {
+      "type": "enum",
+      "name": "FailureReason",
+      "symbols": ["CARD_DECLINED", "INSUFFICIENT_FUNDS", "GATEWAY_ERROR"]
+    }}
+  ]
+}

@@ -1,7 +1,7 @@
 // Package events is the Avro translation layer between the inventory domain
 // and the wire: embedded .avsc contracts (copies; canonical source is schemas/
-// at the repo root), compiled schemas, the OrderPlaced decode side and the
-// inventory.EventEncoder implementation.
+// at the repo root), compiled schemas, the OrderPlaced and PaymentFailed decode
+// sides and the inventory.EventEncoder implementation.
 package events
 
 import (
@@ -23,6 +23,8 @@ const (
 	OrderPlacedType      = "orderflow.order.OrderPlaced"
 	StockReservedType    = "orderflow.inventory.StockReserved"
 	StockUnavailableType = "orderflow.inventory.StockUnavailable"
+	StockReleasedType    = "orderflow.inventory.StockReleased"
+	PaymentFailedType    = "orderflow.payment.PaymentFailed"
 )
 
 // OrderItem is the wire shape of an order line inside OrderPlaced.
@@ -50,14 +52,36 @@ type StockItem struct {
 }
 
 // StockReserved is emitted when a reservation for an order commits.
-// total_cents is the v2 field (echo of OrderPlaced.total_cents) that the
-// payment service charges from.
+// total_cents is the v2 field (echo of OrderPlaced.total_cents) and
+// customer_id the v3 field (echo of OrderPlaced.customer_id) that the payment
+// service charges from and evaluates its failure marker against.
 type StockReserved struct {
 	EventID    string      `avro:"event_id"`
 	OrderID    string      `avro:"order_id"`
 	OccurredAt string      `avro:"occurred_at"`
 	Items      []StockItem `avro:"items"`
 	TotalCents int64       `avro:"total_cents"`
+	CustomerID string      `avro:"customer_id"`
+}
+
+// StockReleased is emitted when a reservation is released (compensation B:
+// PaymentFailed); the lines are the restored reservation lines.
+type StockReleased struct {
+	EventID    string      `avro:"event_id"`
+	OrderID    string      `avro:"order_id"`
+	OccurredAt string      `avro:"occurred_at"`
+	Items      []StockItem `avro:"items"`
+}
+
+// PaymentFailed is the inventory-side view of the payment service's failure
+// fact (compensation B trigger). The inventory service only consumes this one
+// record type on payment.events; failure_reason is the enum symbol.
+type PaymentFailed struct {
+	EventID       string `avro:"event_id"`
+	OrderID       string `avro:"order_id"`
+	OccurredAt    string `avro:"occurred_at"`
+	AmountCents   int64  `avro:"amount_cents"`
+	FailureReason string `avro:"failure_reason"`
 }
 
 // Shortage is the wire shape of an unfulfillable line.
@@ -119,6 +143,20 @@ func DecodeOrderPlaced(payload []byte) (OrderPlaced, error) {
 	return ev, nil
 }
 
+// DecodePaymentFailed decodes a PaymentFailed Avro body (already stripped of
+// the Confluent wire envelope) against the embedded schema.
+func DecodePaymentFailed(payload []byte) (PaymentFailed, error) {
+	c, err := codec("payment-failed")
+	if err != nil {
+		return PaymentFailed{}, err
+	}
+	var ev PaymentFailed
+	if err := avro.Unmarshal(c, payload, &ev); err != nil {
+		return PaymentFailed{}, fmt.Errorf("unmarshal PaymentFailed: %w", err)
+	}
+	return ev, nil
+}
+
 // Encoder implements inventory.EventEncoder with Avro (driven adapter).
 type Encoder struct{}
 
@@ -145,6 +183,7 @@ func (Encoder) StockReserved(r inventory.Reservation) (inventory.OutboxEvent, er
 		OccurredAt: time.Now().UTC().Format(time.RFC3339),
 		Items:      items,
 		TotalCents: r.TotalCents,
+		CustomerID: r.CustomerID,
 	})
 	if err != nil {
 		return inventory.OutboxEvent{}, fmt.Errorf("marshal StockReserved: %w", err)
@@ -183,6 +222,37 @@ func (Encoder) StockUnavailable(orderID string, shortages []inventory.Shortage) 
 	return inventory.OutboxEvent{
 		EventID:     id,
 		RecordType:  StockUnavailableType,
+		AggregateID: orderID,
+		Payload:     payload,
+	}, nil
+}
+
+// StockReleased encodes the fact of the same name (compensation B).
+func (Encoder) StockReleased(orderID string, items []inventory.Item) (inventory.OutboxEvent, error) {
+	id, err := inventory.NewUUID()
+	if err != nil {
+		return inventory.OutboxEvent{}, err
+	}
+	c, err := codec("stock-released")
+	if err != nil {
+		return inventory.OutboxEvent{}, err
+	}
+	wire := make([]StockItem, len(items))
+	for i, it := range items {
+		wire[i] = StockItem{SKU: it.SKU, Qty: it.Qty}
+	}
+	payload, err := avro.Marshal(c, StockReleased{
+		EventID:    id,
+		OrderID:    orderID,
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Items:      wire,
+	})
+	if err != nil {
+		return inventory.OutboxEvent{}, fmt.Errorf("marshal StockReleased: %w", err)
+	}
+	return inventory.OutboxEvent{
+		EventID:     id,
+		RecordType:  StockReleasedType,
 		AggregateID: orderID,
 		Payload:     payload,
 	}, nil

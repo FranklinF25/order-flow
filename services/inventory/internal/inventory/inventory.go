@@ -1,6 +1,7 @@
 // Package inventory holds the stock domain: pure, no infrastructure.
-// The reservation aggregate is inventory-internal (topology §6); M1 has no
-// release path yet — StockReleased lands with M2 compensations.
+// The reservation aggregate is inventory-internal (topology §6); M2 adds the
+// release path (compensation B): PaymentFailed → RESERVED→RELEASED, stock
+// restored and StockReleased emitted only on the transition.
 package inventory
 
 import (
@@ -43,17 +44,43 @@ type Shortage struct {
 }
 
 // Reservation is the inventory-internal fact of stock held for an order.
-// TotalCents echoes OrderPlaced.total_cents (schema v2) so payment can charge
-// from StockReserved without another subscription.
+// TotalCents echoes OrderPlaced.total_cents (schema v2) and CustomerID echoes
+// OrderPlaced.customer_id (schema v3) so payment can charge and evaluate its
+// failure marker from StockReserved without another subscription.
 type Reservation struct {
 	OrderID    string
+	CustomerID string
 	Items      []Item
 	TotalCents int64
+	Status     ReservationStatus
+}
+
+// ReservationStatus is the reservation state machine (topology §6):
+// RESERVED → RELEASED is the only transition, taken by compensation B.
+type ReservationStatus string
+
+const (
+	StatusReserved ReservationStatus = "RESERVED"
+	StatusReleased ReservationStatus = "RELEASED"
+)
+
+// ErrAlreadyReleased guards the state machine: a second release is a no-op.
+var ErrAlreadyReleased = errors.New("reservation already released")
+
+// Release moves the reservation RESERVED→RELEASED, refusing a second release.
+// The caller turns a refusal into an absorbed no-op (commit, no restore, no
+// re-emitted StockReleased).
+func (r *Reservation) Release() error {
+	if r.Status != StatusReserved {
+		return fmt.Errorf("%w: order %q is %s", ErrAlreadyReleased, r.OrderID, r.Status)
+	}
+	r.Status = StatusReleased
+	return nil
 }
 
 // NewReservation validates identity and lines (order.NewOrder enforces the
 // same invariants upstream; revalidated at this service boundary).
-func NewReservation(orderID string, totalCents int64, items []Item) (Reservation, error) {
+func NewReservation(orderID, customerID string, totalCents int64, items []Item) (Reservation, error) {
 	if orderID == "" {
 		return Reservation{}, errors.New("order id is required")
 	}
@@ -78,7 +105,9 @@ func NewReservation(orderID string, totalCents int64, items []Item) (Reservation
 	}
 	return Reservation{
 		OrderID:    orderID,
+		CustomerID: customerID,
 		Items:      append([]Item(nil), items...),
 		TotalCents: totalCents,
+		Status:     StatusReserved,
 	}, nil
 }

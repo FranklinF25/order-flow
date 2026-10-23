@@ -76,6 +76,43 @@ func (f *fakeStore) SaveReservation(_ context.Context, r Reservation) error {
 	return nil
 }
 
+func (f *fakeStore) GetReservation(_ context.Context, orderID string) (*Reservation, error) {
+	if f.failOn == "GetReservation" {
+		return nil, errors.New("boom")
+	}
+	for _, r := range f.reservations {
+		if r.OrderID == orderID {
+			copy := r // mirrors SELECT: caller mutations must not leak into the store
+			return &copy, nil
+		}
+	}
+	return nil, ErrReservationNotFound
+}
+
+func (f *fakeStore) ReleaseReservation(_ context.Context, orderID string) (bool, error) {
+	if f.failOn == "ReleaseReservation" {
+		return false, errors.New("boom")
+	}
+	for i := range f.reservations {
+		if f.reservations[i].OrderID == orderID {
+			if f.reservations[i].Status != StatusReserved {
+				return false, nil
+			}
+			f.reservations[i].Status = StatusReleased
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeStore) IncrementStock(_ context.Context, sku string, qty int) error {
+	if f.failOn == "IncrementStock" {
+		return errors.New("boom")
+	}
+	f.stock[sku] += qty
+	return nil
+}
+
 func (f *fakeStore) AppendOutbox(_ context.Context, e OutboxEvent) error {
 	if f.failOn == "AppendOutbox" {
 		return errors.New("boom")
@@ -109,6 +146,10 @@ type fakeEncoder struct {
 		orderID   string
 		shortages []Shortage
 	}
+	released []struct {
+		orderID string
+		items   []Item
+	}
 }
 
 func (f *fakeEncoder) StockReserved(r Reservation) (OutboxEvent, error) {
@@ -134,8 +175,35 @@ func (f *fakeEncoder) StockUnavailable(orderID string, shortages []Shortage) (Ou
 	}, nil
 }
 
-func placeInput(eventID, orderID string, items ...Item) ReserveInput {
-	return ReserveInput{EventID: eventID, OrderID: orderID, TotalCents: 3000, Items: items}
+func (f *fakeEncoder) StockReleased(orderID string, items []Item) (OutboxEvent, error) {
+	f.released = append(f.released, struct {
+		orderID string
+		items   []Item
+	}{orderID, items})
+	return OutboxEvent{
+		EventID:     "evt-rel-" + orderID,
+		RecordType:  "orderflow.inventory.StockReleased",
+		AggregateID: orderID,
+		Payload:     []byte("avro-bytes"),
+	}, nil
+}
+
+func placeInput(eventID, orderID, customerID string, items ...Item) ReserveInput {
+	return ReserveInput{EventID: eventID, OrderID: orderID, CustomerID: customerID, TotalCents: 3000, Items: items}
+}
+
+func releaseInput(eventID, orderID string) ReleaseInput {
+	return ReleaseInput{EventID: eventID, OrderID: orderID}
+}
+
+// seedReservation inserts a RESERVED reservation directly into the store.
+func seedReservation(t *testing.T, store *fakeStore, orderID string, items ...Item) {
+	t.Helper()
+	r, err := NewReservation(orderID, "cus-1", 3000, items)
+	if err != nil {
+		t.Fatalf("seed reservation: %v", err)
+	}
+	store.reservations = append(store.reservations, r)
 }
 
 func TestHandleOrderPlacedSuccess(t *testing.T) {
@@ -144,7 +212,7 @@ func TestHandleOrderPlacedSuccess(t *testing.T) {
 	svc := NewService(&fakeTx{store}, store, enc)
 
 	applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
-		"evt-1", "ord-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 1},
+		"evt-1", "ord-1", "cus-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 1},
 	))
 	if err != nil {
 		t.Fatalf("HandleOrderPlaced: %v", err)
@@ -189,7 +257,7 @@ func TestHandleOrderPlacedAtomicShortfall(t *testing.T) {
 	svc := NewService(&fakeTx{store}, store, enc)
 
 	applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
-		"evt-1", "ord-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 10},
+		"evt-1", "ord-1", "cus-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 10},
 	))
 	if err != nil {
 		t.Fatalf("HandleOrderPlaced: %v", err)
@@ -230,7 +298,7 @@ func TestHandleOrderPlacedUnknownSkuIsZeroAvailable(t *testing.T) {
 	svc := NewService(&fakeTx{store}, store, enc)
 
 	applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
-		"evt-1", "ord-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-Z", Qty: 1},
+		"evt-1", "ord-1", "cus-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-Z", Qty: 1},
 	))
 	if err != nil {
 		t.Fatalf("HandleOrderPlaced: %v", err)
@@ -255,7 +323,7 @@ func TestHandleOrderPlacedDuplicateEventSkips(t *testing.T) {
 	svc := NewService(&fakeTx{store}, store, enc)
 
 	applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
-		"evt-1", "ord-1", Item{SKU: "SKU-A", Qty: 2},
+		"evt-1", "ord-1", "cus-1", Item{SKU: "SKU-A", Qty: 2},
 	))
 	if err != nil {
 		t.Fatalf("HandleOrderPlaced: %v", err)
@@ -284,7 +352,7 @@ func TestHandleOrderPlacedRollbackOnStoreFailure(t *testing.T) {
 			svc := NewService(&fakeTx{store}, store, enc)
 
 			applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
-				"evt-1", "ord-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 1},
+				"evt-1", "ord-1", "cus-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 1},
 			))
 			if err == nil {
 				t.Fatal("expected error from store failure")
@@ -320,5 +388,184 @@ func TestHandleOrderPlacedValidationPropagates(t *testing.T) {
 	}
 	if store.gets != 0 || len(store.outbox) != 0 {
 		t.Errorf("store touched on validation error: gets=%d outbox=%d", store.gets, len(store.outbox))
+	}
+}
+
+// Rule 1 (M2 S3): StockReserved v3 echoes OrderPlaced.customer_id so payment's
+// simulated gateway can see the failure marker through its only subscription.
+func TestHandleOrderPlacedEchoesCustomerID(t *testing.T) {
+	store := newFakeStore(map[string]int{"SKU-A": 100})
+	enc := &fakeEncoder{}
+	svc := NewService(&fakeTx{store}, store, enc)
+
+	applied, err := svc.HandleOrderPlaced(context.Background(), placeInput(
+		"evt-1", "ord-1", "decline@test", Item{SKU: "SKU-A", Qty: 2},
+	))
+	if err != nil {
+		t.Fatalf("HandleOrderPlaced: %v", err)
+	}
+	if !applied {
+		t.Error("applied = false, want true")
+	}
+	if len(enc.reserved) != 1 {
+		t.Fatalf("encoder reserved calls = %d, want 1", len(enc.reserved))
+	}
+	if got := enc.reserved[0].CustomerID; got != "decline@test" {
+		t.Errorf("echoed customer id = %q, want decline@test", got)
+	}
+	if got := store.reservations[0].CustomerID; got != "decline@test" {
+		t.Errorf("persisted reservation customer id = %q, want decline@test", got)
+	}
+}
+
+// Rule 3 (M2 S1): PaymentFailed releases the reservation in ONE tx —
+// processed_events + RESERVED→RELEASED + stock restored + StockReleased outbox.
+func TestHandlePaymentFailedReleasesReservation(t *testing.T) {
+	store := newFakeStore(map[string]int{"SKU-A": 98, "SKU-B": 49})
+	seedReservation(t, store, "ord-1", Item{SKU: "SKU-A", Qty: 2}, Item{SKU: "SKU-B", Qty: 1})
+	enc := &fakeEncoder{}
+	svc := NewService(&fakeTx{store}, store, enc)
+
+	applied, err := svc.HandlePaymentFailed(context.Background(), releaseInput("evt-p-1", "ord-1"))
+	if err != nil {
+		t.Fatalf("HandlePaymentFailed: %v", err)
+	}
+	if !applied {
+		t.Error("applied = false, want true")
+	}
+	if store.stock["SKU-A"] != 100 || store.stock["SKU-B"] != 50 {
+		t.Errorf("stock = %v, want restored SKU-A:100 SKU-B:50", store.stock)
+	}
+	if got := store.reservations[0].Status; got != StatusReleased {
+		t.Errorf("reservation status = %s, want %s", got, StatusReleased)
+	}
+	if !store.processed["evt-p-1"] {
+		t.Error("payment event must be marked processed in the same tx")
+	}
+	if len(store.outbox) != 1 {
+		t.Fatalf("outbox events = %d, want 1 StockReleased", len(store.outbox))
+	}
+	ev := store.outbox[0]
+	if ev.RecordType != "orderflow.inventory.StockReleased" || ev.AggregateID != "ord-1" {
+		t.Errorf("event = %q/%q, want orderflow.inventory.StockReleased/ord-1", ev.RecordType, ev.AggregateID)
+	}
+	if len(ev.Payload) == 0 {
+		t.Error("payload must encode the StockReleased record")
+	}
+	if len(enc.released) != 1 || enc.released[0].orderID != "ord-1" || len(enc.released[0].items) != 2 {
+		t.Errorf("encoder released = %+v, want ord-1 with 2 items", enc.released)
+	}
+}
+
+// Rule 4a: a replayed PaymentFailed is absorbed — offset commits, but NO second
+// stock restore and NO re-emitted StockReleased.
+func TestHandlePaymentFailedDuplicateEventAbsorbed(t *testing.T) {
+	store := newFakeStore(map[string]int{"SKU-A": 98})
+	seedReservation(t, store, "ord-1", Item{SKU: "SKU-A", Qty: 2})
+	store.processed["evt-p-1"] = true // replay: the guard fires first
+	enc := &fakeEncoder{}
+	svc := NewService(&fakeTx{store}, store, enc)
+
+	applied, err := svc.HandlePaymentFailed(context.Background(), releaseInput("evt-p-1", "ord-1"))
+	if err != nil {
+		t.Fatalf("HandlePaymentFailed: %v", err)
+	}
+	if applied {
+		t.Error("applied = true, want false (duplicate absorbed)")
+	}
+	if store.stock["SKU-A"] != 98 {
+		t.Errorf("stock SKU-A = %d, want untouched 98 (no second restore)", store.stock["SKU-A"])
+	}
+	if got := store.reservations[0].Status; got != StatusReserved {
+		t.Errorf("reservation status = %s, want unchanged %s", got, StatusReserved)
+	}
+	if len(store.outbox) != 0 {
+		t.Errorf("outbox events = %d, want 0 (no re-emitted StockReleased)", len(store.outbox))
+	}
+}
+
+// Rule 4b: a release for an order already RELEASED (different PaymentFailed
+// event id) is absorbed — no restore, no re-emit, no error.
+func TestHandlePaymentFailedAlreadyReleasedAbsorbed(t *testing.T) {
+	store := newFakeStore(map[string]int{"SKU-A": 100}) // stock back to pre-reservation level
+	seedReservation(t, store, "ord-1", Item{SKU: "SKU-A", Qty: 2})
+	store.reservations[0].Status = StatusReleased // already released earlier
+	enc := &fakeEncoder{}
+	svc := NewService(&fakeTx{store}, store, enc)
+
+	applied, err := svc.HandlePaymentFailed(context.Background(), releaseInput("evt-p-2", "ord-1"))
+	if err != nil {
+		t.Fatalf("HandlePaymentFailed: %v", err)
+	}
+	if applied {
+		t.Error("applied = true, want false (already released)")
+	}
+	if store.stock["SKU-A"] != 100 {
+		t.Errorf("stock SKU-A = %d, want untouched 100 (no double restore)", store.stock["SKU-A"])
+	}
+	if len(store.outbox) != 0 {
+		t.Errorf("outbox events = %d, want 0 (no re-emitted StockReleased)", len(store.outbox))
+	}
+	if !store.processed["evt-p-2"] {
+		t.Error("absorbed event must still be marked processed (offset commits)")
+	}
+}
+
+// Rule 4c: PaymentFailed for an order with no reservation at all (never placed,
+// or StockUnavailable path) is absorbed safely — no error, no outbox.
+func TestHandlePaymentFailedUnknownOrderAbsorbed(t *testing.T) {
+	store := newFakeStore(map[string]int{"SKU-A": 100})
+	enc := &fakeEncoder{}
+	svc := NewService(&fakeTx{store}, store, enc)
+
+	applied, err := svc.HandlePaymentFailed(context.Background(), releaseInput("evt-p-1", "ord-unknown"))
+	if err != nil {
+		t.Fatalf("HandlePaymentFailed: %v (unknown order must absorb, not error)", err)
+	}
+	if applied {
+		t.Error("applied = true, want false (nothing to release)")
+	}
+	if store.stock["SKU-A"] != 100 {
+		t.Errorf("stock SKU-A = %d, want untouched 100", store.stock["SKU-A"])
+	}
+	if len(store.outbox) != 0 {
+		t.Errorf("outbox events = %d, want 0", len(store.outbox))
+	}
+	if !store.processed["evt-p-1"] {
+		t.Error("absorbed event must still be marked processed (offset commits)")
+	}
+}
+
+// Rule 3 atomicity: any mid-release failure rolls the whole unit of work back —
+// stock untouched, reservation still RESERVED, outbox empty, guard not marked.
+func TestHandlePaymentFailedRollbackOnStoreFailure(t *testing.T) {
+	for _, failOn := range []string{"GetReservation", "ReleaseReservation", "IncrementStock", "AppendOutbox"} {
+		t.Run(failOn, func(t *testing.T) {
+			store := newFakeStore(map[string]int{"SKU-A": 98})
+			seedReservation(t, store, "ord-1", Item{SKU: "SKU-A", Qty: 2})
+			store.failOn = failOn
+			enc := &fakeEncoder{}
+			svc := NewService(&fakeTx{store}, store, enc)
+
+			applied, err := svc.HandlePaymentFailed(context.Background(), releaseInput("evt-p-1", "ord-1"))
+			if err == nil {
+				t.Fatal("expected error from store failure")
+			}
+			if applied {
+				t.Error("applied = true, want false on failure")
+			}
+			if store.stock["SKU-A"] != 98 {
+				t.Errorf("stock SKU-A = %d, want rolled back 98", store.stock["SKU-A"])
+			}
+			if got := store.reservations[0].Status; got != StatusReserved {
+				t.Errorf("reservation status = %s, want rolled back %s", got, StatusReserved)
+			}
+			if len(store.outbox) != 0 {
+				t.Errorf("outbox events = %d, want 0 (rollback)", len(store.outbox))
+			}
+			if store.processed["evt-p-1"] {
+				t.Error("evt-p-1 marked processed after rollback — guard must roll back too")
+			}
+		})
 	}
 }

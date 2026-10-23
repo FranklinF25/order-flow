@@ -35,8 +35,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("serde: %v", err)
 	}
-	// Only produced records are registered; the consumed OrderPlaced decodes
-	// against the embedded schema copy (the order service owns that subject).
+	// Only produced records are registered; the consumed OrderPlaced and
+	// PaymentFailed decode against the embedded schema copies (the order and
+	// payment services own those subjects).
 	mustEnsureSchema(ctx, serde, events.StockReservedType, "stock-reserved")
 	mustEnsureSchema(ctx, serde, events.StockUnavailableType, "stock-unavailable")
 
@@ -52,6 +53,12 @@ func main() {
 		log.Fatalf("consumer: %v", err)
 	}
 	go consumer.Run(ctx)
+
+	paymentConsumer, err := inventorykafka.NewPaymentConsumer(brokers, "payment.events", "inventory.payment-events", svc)
+	if err != nil {
+		log.Fatalf("payment consumer: %v", err)
+	}
+	go paymentConsumer.Run(ctx)
 
 	srv := &http.Server{
 		Addr:              addr,

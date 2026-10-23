@@ -111,6 +111,18 @@ func (t *txStore) AppendOutbox(ctx context.Context, e inventory.OutboxEvent) err
 	return appendOutbox(ctx, t.tx, e)
 }
 
+func (t *txStore) GetReservation(ctx context.Context, orderID string) (*inventory.Reservation, error) {
+	return getReservation(ctx, t.tx, orderID)
+}
+
+func (t *txStore) ReleaseReservation(ctx context.Context, orderID string) (bool, error) {
+	return releaseReservation(ctx, t.tx, orderID)
+}
+
+func (t *txStore) IncrementStock(ctx context.Context, sku string, qty int) error {
+	return incrementStock(ctx, t.tx, sku, qty)
+}
+
 // Pool-level Store methods (reads and writes outside an explicit tx).
 
 func (s *Store) MarkProcessed(ctx context.Context, eventID string) error {
@@ -135,6 +147,18 @@ func (s *Store) SaveReservation(ctx context.Context, r inventory.Reservation) er
 
 func (s *Store) AppendOutbox(ctx context.Context, e inventory.OutboxEvent) error {
 	return appendOutbox(ctx, s.pool, e)
+}
+
+func (s *Store) GetReservation(ctx context.Context, orderID string) (*inventory.Reservation, error) {
+	return getReservation(ctx, s.pool, orderID)
+}
+
+func (s *Store) ReleaseReservation(ctx context.Context, orderID string) (bool, error) {
+	return releaseReservation(ctx, s.pool, orderID)
+}
+
+func (s *Store) IncrementStock(ctx context.Context, sku string, qty int) error {
+	return incrementStock(ctx, s.pool, sku, qty)
 }
 
 func markProcessed(ctx context.Context, ex execer, eventID string) error {
@@ -206,6 +230,50 @@ func appendOutbox(ctx context.Context, ex execer, e inventory.OutboxEvent) error
 		`INSERT INTO outbox (event_id, record_type, aggregate_id, payload) VALUES ($1, $2, $3, $4)`,
 		e.EventID, e.RecordType, e.AggregateID, e.Payload,
 	)
+	return err
+}
+
+func getReservation(ctx context.Context, ex execer, orderID string) (*inventory.Reservation, error) {
+	var (
+		r      inventory.Reservation
+		items  []byte
+		status string
+	)
+	err := ex.QueryRow(ctx,
+		`SELECT order_id, items, total_cents, status FROM reservations WHERE order_id = $1`, orderID).
+		Scan(&r.OrderID, &items, &r.TotalCents, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, inventory.ErrReservationNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(items, &r.Items); err != nil {
+		return nil, fmt.Errorf("unmarshal reservation items: %w", err)
+	}
+	r.Status = inventory.ReservationStatus(status)
+	return &r, nil
+}
+
+// releaseReservation takes RESERVED→RELEASED; the WHERE status = 'RESERVED'
+// guard makes the transition atomic (mirrors the domain state machine and the
+// stock CHECK backstop): a losing concurrent tx reports no transition and the
+// caller absorbs instead of double-restoring or re-emitting.
+func releaseReservation(ctx context.Context, ex execer, orderID string) (bool, error) {
+	tag, err := ex.Exec(ctx,
+		`UPDATE reservations SET status = 'RELEASED', released_at = now()
+		 WHERE order_id = $1 AND status = 'RESERVED'`, orderID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// incrementStock restores quantities on release (compensation B); it is the
+// exact inverse of decrementStock and runs in the same tx as the transition.
+func incrementStock(ctx context.Context, ex execer, sku string, qty int) error {
+	_, err := ex.Exec(ctx, `UPDATE stock SET available = available + $2 WHERE sku = $1`, sku, qty)
 	return err
 }
 
