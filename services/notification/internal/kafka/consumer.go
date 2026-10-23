@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -24,13 +23,19 @@ const (
 // Consumer is the driving adapter that reacts to OrderConfirmed and
 // OrderCancelled facts.
 type Consumer struct {
-	client *kgo.Client
-	svc    *notification.Service
-	dec    *events.Decoder
+	client  *kgo.Client
+	svc     *notification.Service
+	dec     *events.Decoder
+	handler Handler // handle wrapped with the retries/DLQ wrapper (topology §7)
 }
 
-// NewConsumer builds the order.events group consumer.
-func NewConsumer(brokers []string, svc *notification.Service, dec *events.Decoder) (*Consumer, error) {
+// NewConsumer builds the order.events group consumer. dlq carries the
+// retries/DLQ wrapper (topology §7), which replaces the old internal
+// give-up-uncommitted retry loop: 3 blocking attempts, then the raw record
+// parks on <topic>.<group>.dlq and the offset commits. Notification keeps no
+// Redis gate in M2 (gate scope stays the 3 saga services); the processed_events
+// guard inside Notify remains the idempotency backstop.
+func NewConsumer(brokers []string, svc *notification.Service, dec *events.Decoder, dlq DLQProducer) (*Consumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(consumerGroup),
@@ -43,11 +48,16 @@ func NewConsumer(brokers []string, svc *notification.Service, dec *events.Decode
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	return &Consumer{client: cl, svc: svc, dec: dec}, nil
+	c := &Consumer{client: cl, svc: svc, dec: dec}
+	c.handler = WithRetries(dlq, RetryBaseDelay, consumerGroup, c.handle)
+	return c, nil
 }
 
 // Run polls until ctx is cancelled. One record per poll keeps handle→commit
-// strictly sequential and per-order ordered inside the partition.
+// strictly sequential and per-order ordered inside the partition. The handler
+// already applied retries + DLQ (topology §7), so the only error reaching Run
+// is a DLQ-park failure: stop uncommitted so the record redelivers and
+// re-runs the whole path (at-least-once into the DLQ).
 func (c *Consumer) Run(ctx context.Context) {
 	defer c.client.Close()
 	for {
@@ -61,12 +71,10 @@ func (c *Consumer) Run(ctx context.Context) {
 			}
 		})
 		fetches.EachRecord(func(rec *kgo.Record) {
-			if err := c.handleWithRetry(ctx, rec); err != nil {
-				// No commit: the group position stays behind, so the record
-				// redelivers after restart/rebalance. The retries/DLQ wrapper
-				// (topology §7) lands with the M2 inline pass.
-				log.Printf("%s: giving up on event %s: %v", consumerGroup,
-					headerValue(rec, "event_id"), err)
+			if err := c.handler(ctx, rec); err != nil {
+				log.Printf("%s: stopping uncommitted on %s[%d] offset %d (DLQ park failed; redelivery re-runs the path): %v",
+					consumerGroup, rec.Topic, rec.Partition, rec.Offset, err)
+				c.client.Close()
 				return
 			}
 			if err := c.client.CommitRecords(ctx, rec); err != nil && ctx.Err() == nil {
@@ -74,26 +82,6 @@ func (c *Consumer) Run(ctx context.Context) {
 			}
 		})
 	}
-}
-
-// handleWithRetry applies §7's blocking in-consumer retries (3 attempts,
-// exponential backoff) before giving up without committing.
-func (c *Consumer) handleWithRetry(ctx context.Context, rec *kgo.Record) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(1<<(attempt-1)) * 250 * time.Millisecond):
-			}
-		}
-		if err = c.handle(ctx, rec); err == nil {
-			return nil
-		}
-		log.Printf("%s: attempt %d: %v", consumerGroup, attempt+1, err)
-	}
-	return err
 }
 
 // handle reacts ONLY to orderflow.order.OrderConfirmed and OrderCancelled

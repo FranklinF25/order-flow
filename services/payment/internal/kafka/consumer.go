@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
 
@@ -26,12 +25,16 @@ type Consumer struct {
 	client  *kgo.Client
 	svc     *payment.Service
 	dec     *events.Decoder
-	handler Handler // handleWithRetry wrapped with the Redis fast-gate (nil gate → unchanged)
+	handler Handler // handle wrapped with fast-gate → retries/DLQ (nil gate → gate passes through)
 }
 
 // NewConsumer builds the inventory.events group consumer. gate may be nil
-// (REDIS_URL unset): the fast-gate is disabled and records dispatch as before.
-func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder, gate FastGate) (*Consumer, error) {
+// (REDIS_URL unset): the fast-gate is disabled and records dispatch as
+// before. dlq carries the retries/DLQ wrapper (topology §7). Composition is
+// outside-in — fast-gate → retries/DLQ → handle — so a gate absorb returns
+// before any retry attempt is burned, and the internal handleWithRetry loop
+// is gone: exactly one retry mechanism, exactly 3 total attempts.
+func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder, gate FastGate, dlq DLQProducer) (*Consumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(consumerGroup),
@@ -45,17 +48,21 @@ func NewConsumer(brokers []string, svc *payment.Service, dec *events.Decoder, ga
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
 	c := &Consumer{client: cl, svc: svc, dec: dec}
-	// Fast-gate outside the retry loop (topology §7 first gate): a hit
-	// absorbs before any attempt and the offset commits; a check error
+	// Fast-gate outside the retries/DLQ wrapper (topology §7 first gate): a
+	// hit absorbs before any attempt and the offset commits; a check error
 	// degrades into the normal retried path; Mark runs only after the final
 	// success — the tx has committed by then (Capture's processed_events
-	// guard is the real gate).
-	c.handler = WithFastGate(gate, c.handleWithRetry)
+	// guard is the real gate). On a poison record the wrapper parks it on
+	// <topic>.<group>.dlq and returns nil, so the offset commits below.
+	c.handler = WithFastGate(gate, WithRetries(dlq, RetryBaseDelay, consumerGroup, c.handle))
 	return c, nil
 }
 
 // Run polls until ctx is cancelled. One record per poll keeps handle→commit
-// strictly sequential and per-order ordered inside the partition.
+// strictly sequential and per-order ordered inside the partition. The
+// handler already applied retries + DLQ (topology §7), so the only error
+// reaching Run is a DLQ-park failure: stop uncommitted so the record
+// redelivers and re-runs the whole path (at-least-once into the DLQ).
 func (c *Consumer) Run(ctx context.Context) {
 	defer c.client.Close()
 	for {
@@ -70,11 +77,9 @@ func (c *Consumer) Run(ctx context.Context) {
 		})
 		fetches.EachRecord(func(rec *kgo.Record) {
 			if err := c.handler(ctx, rec); err != nil {
-				// No commit: the group position stays behind, so the record
-				// redelivers after restart/rebalance. M2 replaces this with
-				// the DLQ per topology §7 (3 retries already applied here).
-				log.Printf("%s: giving up on event %s: %v", consumerGroup,
-					headerValue(rec, "event_id"), err)
+				log.Printf("%s: stopping uncommitted on %s[%d] offset %d (DLQ park failed; redelivery re-runs the path): %v",
+					consumerGroup, rec.Topic, rec.Partition, rec.Offset, err)
+				c.client.Close()
 				return
 			}
 			if err := c.client.CommitRecords(ctx, rec); err != nil && ctx.Err() == nil {
@@ -82,26 +87,6 @@ func (c *Consumer) Run(ctx context.Context) {
 			}
 		})
 	}
-}
-
-// handleWithRetry applies §7's blocking in-consumer retries (3 attempts,
-// exponential backoff) before giving up without committing.
-func (c *Consumer) handleWithRetry(ctx context.Context, rec *kgo.Record) error {
-	var err error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Duration(1<<(attempt-1)) * 250 * time.Millisecond):
-			}
-		}
-		if err = c.handle(ctx, rec); err == nil {
-			return nil
-		}
-		log.Printf("%s: attempt %d: %v", consumerGroup, attempt+1, err)
-	}
-	return err
 }
 
 // handle reacts ONLY to orderflow.inventory.StockReserved (topology §6);

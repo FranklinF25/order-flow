@@ -67,15 +67,27 @@ func main() {
 	}
 	go relay.Run(ctx)
 
+	// DLQ producer for the retries/DLQ wrapper (topology §7): a plain
+	// dedicated kgo client, closed on shutdown; the wrapper parks poison
+	// records on <source-topic>.<group>.dlq and then commits the offset.
+	dlq, err := orderkafka.NewDLQProducer(brokers)
+	if err != nil {
+		log.Fatalf("dlq producer: %v", err)
+	}
+	defer dlq.Close()
+
 	svc := order.NewService(store, store, events.NewEncoder())
 
 	// Saga subscriptions (topology §6): order reacts to inventory.events
 	// (StockReserved + StockUnavailable) and payment.events (PaymentCaptured +
-	// PaymentFailed), each stream in its own consumer group.
+	// PaymentFailed), each stream in its own consumer group. Composition
+	// (outside-in): fast-gate → retries/DLQ → chained handlers — a gate
+	// absorb returns before any retry attempt is burned.
 	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events",
 		orderkafka.WithFastGate(
 			orderkafka.NewRedisGate(rdb, "order.inventory-events"),
-			orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc))))
+			orderkafka.WithRetries(dlq, orderkafka.RetryBaseDelay, "order.inventory-events",
+				orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc)))))
 	if err != nil {
 		log.Fatalf("inventory consumer: %v", err)
 	}
@@ -84,7 +96,8 @@ func main() {
 	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events",
 		orderkafka.WithFastGate(
 			orderkafka.NewRedisGate(rdb, "order.payment-events"),
-			orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc))))
+			orderkafka.WithRetries(dlq, orderkafka.RetryBaseDelay, "order.payment-events",
+				orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc)))))
 	if err != nil {
 		log.Fatalf("payment consumer: %v", err)
 	}

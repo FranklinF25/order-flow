@@ -67,10 +67,19 @@ func main() {
 	}
 	go relay.Run(ctx)
 
+	// DLQ producer for the retries/DLQ wrapper (topology §7): a plain
+	// dedicated kgo client, closed on shutdown; the wrapper parks poison
+	// records on <source-topic>.<group>.dlq and then commits the offset.
+	dlq, err := paymentkafka.NewDLQProducer(brokers)
+	if err != nil {
+		log.Fatalf("dlq producer: %v", err)
+	}
+	defer dlq.Close()
+
 	svc := payment.NewService(store, payment.NewSimulatedGateway(), events.NewEncoder())
 
 	consumer, err := paymentkafka.NewConsumer(brokers, svc, events.NewDecoder(),
-		paymentkafka.NewRedisGate(rdb, "payment.inventory-events"))
+		paymentkafka.NewRedisGate(rdb, "payment.inventory-events"), dlq)
 	if err != nil {
 		log.Fatalf("consumer: %v", err)
 	}

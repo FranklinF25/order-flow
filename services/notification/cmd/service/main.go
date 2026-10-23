@@ -47,12 +47,21 @@ func main() {
 	}
 	go relay.Run(ctx)
 
+	// DLQ producer for the retries/DLQ wrapper (topology §7): a plain
+	// dedicated kgo client, closed on shutdown; the wrapper parks poison
+	// records on <source-topic>.<group>.dlq and then commits the offset.
+	dlq, err := notificationkafka.NewDLQProducer(brokers)
+	if err != nil {
+		log.Fatalf("dlq producer: %v", err)
+	}
+	defer dlq.Close()
+
 	pub := mustRabbit(ctx, rabbitURL)
 	defer pub.Close()
 
 	svc := notification.NewService(store, pub, events.NewEncoder())
 
-	consumer, err := notificationkafka.NewConsumer(brokers, svc, events.NewDecoder())
+	consumer, err := notificationkafka.NewConsumer(brokers, svc, events.NewDecoder(), dlq)
 	if err != nil {
 		log.Fatalf("consumer: %v", err)
 	}

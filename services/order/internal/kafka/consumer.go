@@ -30,8 +30,11 @@ func Chain(handlers ...Handler) Handler {
 	}
 }
 
-// Consumer polls one stream in one group. M1: no retries/DLQ — on a handler
-// error it stops uncommitted so the record is redelivered on the next start.
+// Consumer polls one stream in one group. The handler carries the full
+// reliability stack (fast-gate → retries/DLQ, topology §7); the only error
+// that reaches Run is a DLQ-park failure, which stops the consumer
+// uncommitted so the record redelivers on the next start (at-least-once into
+// the DLQ).
 type Consumer struct {
 	client  *kgo.Client
 	handler Handler
@@ -68,12 +71,12 @@ func (c *Consumer) Run(ctx context.Context) {
 				break
 			}
 			if err := c.handler(ctx, rec); err != nil {
-				log.Printf("consumer stopped on %s[%d] offset %d: %v (M1: no retry/DLQ)", rec.Topic, rec.Partition, rec.Offset, err)
+				log.Printf("consumer stopped on %s[%d] offset %d: %v (DLQ park failed; redelivery re-runs the path)", rec.Topic, rec.Partition, rec.Offset, err)
 				c.client.Close()
 				return
 			}
 			if err := c.client.CommitRecords(ctx, rec); err != nil && ctx.Err() == nil {
-				log.Printf("commit %s[%d] offset %d failed: %v (M1: no retry/DLQ)", rec.Topic, rec.Partition, rec.Offset, err)
+				log.Printf("commit %s[%d] offset %d failed: %v (stopping; record redelivers)", rec.Topic, rec.Partition, rec.Offset, err)
 				c.client.Close()
 				return
 			}

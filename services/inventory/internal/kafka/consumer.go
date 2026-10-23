@@ -18,9 +18,10 @@ import (
 // each record's offset is committed explicitly AFTER its handler transaction
 // commits. A crash between handler commit and offset commit replays the
 // record; the processed_events insert inside the same handler transaction
-// makes the replay a silent no-op. M1 has no retries/DLQ (topology §7): on a
-// handler error the consumer stops uncommitted, so the record is redelivered
-// on the next start.
+// makes the replay a silent no-op. Retries/DLQ (topology §7) wrap the
+// handler inside the fast-gate: 3 blocking attempts, then the raw record
+// parks on <topic>.<group>.dlq and the offset commits; the only error that
+// reaches Run is a DLQ-park failure, which stops the consumer uncommitted.
 type Consumer struct {
 	client  *kgo.Client
 	svc     *inventory.Service
@@ -29,7 +30,9 @@ type Consumer struct {
 
 // NewConsumer builds the order.events consumer. gate may be nil (REDIS_URL
 // unset): the fast-gate is disabled and records dispatch exactly as before.
-func NewConsumer(brokers []string, topic, group string, svc *inventory.Service, gate FastGate) (*Consumer, error) {
+// dlq carries the retries/DLQ wrapper (topology §7): composition outside-in
+// is fast-gate → retries/DLQ → handle, so a gate absorb never burns a retry.
+func NewConsumer(brokers []string, topic, group string, svc *inventory.Service, gate FastGate, dlq DLQProducer) (*Consumer, error) {
 	cl, err := kgo.NewClient(
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
@@ -46,11 +49,16 @@ func NewConsumer(brokers []string, topic, group string, svc *inventory.Service, 
 	c := &Consumer{client: cl, svc: svc}
 	// Fast-gate before dispatch (topology §7 first gate); absorb-on-hit
 	// returns nil, so the offset commits exactly like the duplicate path.
-	c.handler = WithFastGate(gate, c.handle)
+	// Retries/DLQ inside the gate: 3 blocking attempts, then the raw record
+	// is parked on <topic>.<group>.dlq and the offset commits.
+	c.handler = WithFastGate(gate, WithRetries(dlq, RetryBaseDelay, group, c.handle))
 	return c, nil
 }
 
-// Run polls until ctx is cancelled or a handler fails (no retries in M1).
+// Run polls until ctx is cancelled or the handler fails. The handler already
+// applied retries + DLQ (topology §7), so the only error reaching Run is a
+// DLQ-park failure: stop uncommitted so the record redelivers and re-runs
+// the whole path (at-least-once into the DLQ).
 func (c *Consumer) Run(ctx context.Context) {
 	for ctx.Err() == nil {
 		fetches := c.client.PollRecords(ctx, 50)
@@ -65,13 +73,13 @@ func (c *Consumer) Run(ctx context.Context) {
 				break
 			}
 			if err := c.handler(ctx, rec); err != nil {
-				log.Printf("consumer stopped on %s[%d] offset %d: %v (M1: no retry/DLQ)", rec.Topic, rec.Partition, rec.Offset, err)
+				log.Printf("consumer stopped on %s[%d] offset %d: %v (DLQ park failed; redelivery re-runs the path)", rec.Topic, rec.Partition, rec.Offset, err)
 				c.client.Close()
 				return
 			}
 			if err := c.client.CommitRecords(ctx, rec); err != nil {
 				if ctx.Err() == nil {
-					log.Printf("commit %s[%d] offset %d failed: %v (M1: no retry/DLQ)", rec.Topic, rec.Partition, rec.Offset, err)
+					log.Printf("commit %s[%d] offset %d failed: %v (stopping; record redelivers)", rec.Topic, rec.Partition, rec.Offset, err)
 					c.client.Close()
 					return
 				}

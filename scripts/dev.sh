@@ -16,7 +16,13 @@ case "$cmd" in
   logs)    $COMPOSE logs -f --tail=100 ;;
   dev)     $COMPOSE --profile dev up -d --build --wait ;;
   topics)
-    for t in order.events inventory.events payment.events notification.events; do
+    for t in order.events inventory.events payment.events notification.events \
+             inventory.events.order.inventory-events.dlq \
+             payment.events.order.payment-events.dlq \
+             order.events.inventory.order-events.dlq \
+             payment.events.inventory.payment-events.dlq \
+             inventory.events.payment.inventory-events.dlq \
+             order.events.notification.order-events.dlq; do
       $COMPOSE exec -T kafka $KAFKA_TOPICS --bootstrap-server "$BROKER" --create --if-not-exists --topic "$t" --partitions 3
     done
     $COMPOSE exec -T kafka $KAFKA_TOPICS --bootstrap-server "$BROKER" --list
