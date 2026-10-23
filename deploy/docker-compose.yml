@@ -182,7 +182,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       ORDER_DB_DSN: postgres://order:order@order-db:5432/order?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      REDIS_URL: redis:6379
+      REDIS_URL: redis://redis:6379/
     ports:
       - "8082:8080"
     volumes:
@@ -211,7 +211,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       INVENTORY_DB_DSN: postgres://inventory:inventory@inventory-db:5432/inventory?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      REDIS_URL: redis:6379
+      REDIS_URL: redis://redis:6379/
     ports:
       - "8083:8080"
     volumes:
@@ -240,7 +240,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       PAYMENT_DB_DSN: postgres://payment:payment@payment-db:5432/payment?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      REDIS_URL: redis:6379
+      REDIS_URL: redis://redis:6379/
     ports:
       - "8084:8080"
     volumes:
