@@ -114,6 +114,15 @@ func (fakeEncoder) OrderConfirmed(o Order) (OutboxEvent, error) {
 	}, nil
 }
 
+func (fakeEncoder) OrderCancelled(o Order) (OutboxEvent, error) {
+	return OutboxEvent{
+		EventID:     "evt-x-" + string(o.CancelReason),
+		RecordType:  "orderflow.order.OrderCancelled",
+		AggregateID: o.ID,
+		Payload:     []byte("avro-bytes"),
+	}, nil
+}
+
 func TestPlaceOrderPersistsOrderAndOutboxEvent(t *testing.T) {
 	store := newFakeStore()
 	svc := NewService(&fakeTx{store}, store, fakeEncoder{})

@@ -41,6 +41,7 @@ type Tx interface {
 type EventEncoder interface {
 	OrderPlaced(o Order) (OutboxEvent, error)
 	OrderConfirmed(o Order) (OutboxEvent, error)
+	OrderCancelled(o Order) (OutboxEvent, error)
 }
 
 // PlaceOrderInput is the driving command for the REST adapter.
@@ -139,6 +140,58 @@ func (s *Service) OnPaymentCaptured(ctx context.Context, eventID, orderID string
 			return err
 		}
 		ev, err := s.enc.OrderConfirmed(*o)
+		if err != nil {
+			return err
+		}
+		return st.AppendOutbox(ctx, ev)
+	})
+}
+
+// OnStockUnavailable applies the inventory.events StockUnavailable fact
+// (compensation A, topology §6): AWAITING_STOCK → CANCELLED(STOCK_UNAVAILABLE),
+// appending OrderCancelled to the outbox in the same transaction. Duplicate
+// event ids are silent no-ops; events arriving in a wrong or terminal state
+// are absorbed as safe no-ops (the offset still commits, nothing is emitted).
+func (s *Service) OnStockUnavailable(ctx context.Context, eventID, orderID string) error {
+	return s.cancel(ctx, eventID, orderID, (*Order).OnStockUnavailable)
+}
+
+// OnPaymentFailed applies the payment.events PaymentFailed fact
+// (compensation B, topology §6): AWAITING_PAYMENT → CANCELLED(PAYMENT_FAILED),
+// appending OrderCancelled to the outbox in the same transaction. Duplicate
+// event ids and wrong/terminal-state arrivals are absorbed as above.
+func (s *Service) OnPaymentFailed(ctx context.Context, eventID, orderID string) error {
+	return s.cancel(ctx, eventID, orderID, (*Order).OnPaymentFailed)
+}
+
+// cancel is the shared compensation unit of work: idempotency guard, state
+// transition and OrderCancelled outbox append commit or roll back together.
+// InvalidTransitionError is absorbed (M2 semantics: a compensation racing the
+// happy path must not wedge the consumer — topology §6 terminal guard).
+func (s *Service) cancel(ctx context.Context, eventID, orderID string, apply func(*Order) error) error {
+	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		inserted, err := st.InsertProcessedEvent(ctx, eventID)
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			return nil
+		}
+		o, err := st.GetOrder(ctx, orderID)
+		if err != nil {
+			return err
+		}
+		if err := apply(o); err != nil {
+			var ite *InvalidTransitionError
+			if errors.As(err, &ite) {
+				return nil // absorb: wrong/terminal state, no state change, no outbox
+			}
+			return err
+		}
+		if err := st.UpdateOrder(ctx, o); err != nil {
+			return err
+		}
+		ev, err := s.enc.OrderCancelled(*o)
 		if err != nil {
 			return err
 		}

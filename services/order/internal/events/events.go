@@ -21,6 +21,7 @@ var schemasFS embed.FS
 const (
 	OrderPlacedType    = "orderflow.order.OrderPlaced"
 	OrderConfirmedType = "orderflow.order.OrderConfirmed"
+	OrderCancelledType = "orderflow.order.OrderCancelled"
 )
 
 // OrderItem is the wire shape of an order line inside OrderPlaced.
@@ -47,11 +48,26 @@ type OrderConfirmed struct {
 	OccurredAt string `avro:"occurred_at"`
 }
 
+// OrderCancelled is emitted when the saga compensates: stock unavailable or
+// payment failed (topology §6 compensations A/B).
+type OrderCancelled struct {
+	EventID    string `avro:"event_id"`
+	OrderID    string `avro:"order_id"`
+	OccurredAt string `avro:"occurred_at"`
+	Reason     string `avro:"reason"`
+}
+
 // Consume-side records (topology §6 subscriptions).
 
 const (
 	StockReservedType   = "orderflow.inventory.StockReserved"
 	PaymentCapturedType = "orderflow.payment.PaymentCaptured"
+)
+
+// M2 compensation facts (topology §6 subscriptions).
+const (
+	StockUnavailableType = "orderflow.inventory.StockUnavailable"
+	PaymentFailedType    = "orderflow.payment.PaymentFailed"
 )
 
 // StockItem is a reserved line on the inventory stream.
@@ -78,6 +94,30 @@ type PaymentCaptured struct {
 	AmountCents int64  `avro:"amount_cents"`
 }
 
+// Shortage is one out-of-stock line inside StockUnavailable.
+type Shortage struct {
+	SKU       string `avro:"sku"`
+	Requested int    `avro:"requested"`
+	Available int    `avro:"available"`
+}
+
+// StockUnavailable is consumed from inventory.events (compensation A).
+type StockUnavailable struct {
+	EventID    string     `avro:"event_id"`
+	OrderID    string     `avro:"order_id"`
+	OccurredAt string     `avro:"occurred_at"`
+	Shortages  []Shortage `avro:"shortages"`
+}
+
+// PaymentFailed is consumed from payment.events (compensation B).
+type PaymentFailed struct {
+	EventID       string `avro:"event_id"`
+	OrderID       string `avro:"order_id"`
+	OccurredAt    string `avro:"occurred_at"`
+	AmountCents   int64  `avro:"amount_cents"`
+	FailureReason string `avro:"failure_reason"`
+}
+
 // DecodeStockReserved decodes a StockReserved Avro body (wire envelope already stripped).
 func DecodeStockReserved(payload []byte) (StockReserved, error) {
 	c, err := codec("stock-reserved")
@@ -100,6 +140,32 @@ func DecodePaymentCaptured(payload []byte) (PaymentCaptured, error) {
 	var ev PaymentCaptured
 	if err := avro.Unmarshal(c, payload, &ev); err != nil {
 		return PaymentCaptured{}, fmt.Errorf("unmarshal PaymentCaptured: %w", err)
+	}
+	return ev, nil
+}
+
+// DecodeStockUnavailable decodes a StockUnavailable Avro body (wire envelope already stripped).
+func DecodeStockUnavailable(payload []byte) (StockUnavailable, error) {
+	c, err := codec("stock-unavailable")
+	if err != nil {
+		return StockUnavailable{}, err
+	}
+	var ev StockUnavailable
+	if err := avro.Unmarshal(c, payload, &ev); err != nil {
+		return StockUnavailable{}, fmt.Errorf("unmarshal StockUnavailable: %w", err)
+	}
+	return ev, nil
+}
+
+// DecodePaymentFailed decodes a PaymentFailed Avro body (wire envelope already stripped).
+func DecodePaymentFailed(payload []byte) (PaymentFailed, error) {
+	c, err := codec("payment-failed")
+	if err != nil {
+		return PaymentFailed{}, err
+	}
+	var ev PaymentFailed
+	if err := avro.Unmarshal(c, payload, &ev); err != nil {
+		return PaymentFailed{}, fmt.Errorf("unmarshal PaymentFailed: %w", err)
 	}
 	return ev, nil
 }
@@ -189,6 +255,34 @@ func (Encoder) OrderConfirmed(o order.Order) (order.OutboxEvent, error) {
 	return order.OutboxEvent{
 		EventID:     id,
 		RecordType:  OrderConfirmedType,
+		AggregateID: o.ID,
+		Payload:     payload,
+	}, nil
+}
+
+// OrderCancelled encodes the compensation fact; the reason comes from the
+// aggregate's cancel reason set by the state-machine transition.
+func (Encoder) OrderCancelled(o order.Order) (order.OutboxEvent, error) {
+	id, err := order.NewUUID()
+	if err != nil {
+		return order.OutboxEvent{}, err
+	}
+	c, err := codec("order-cancelled")
+	if err != nil {
+		return order.OutboxEvent{}, err
+	}
+	payload, err := avro.Marshal(c, OrderCancelled{
+		EventID:    id,
+		OrderID:    o.ID,
+		OccurredAt: time.Now().UTC().Format(time.RFC3339),
+		Reason:     string(o.CancelReason),
+	})
+	if err != nil {
+		return order.OutboxEvent{}, fmt.Errorf("marshal OrderCancelled: %w", err)
+	}
+	return order.OutboxEvent{
+		EventID:     id,
+		RecordType:  OrderCancelledType,
 		AggregateID: o.ID,
 		Payload:     payload,
 	}, nil

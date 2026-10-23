@@ -37,6 +37,7 @@ func main() {
 	}
 	mustEnsureSchema(ctx, serde, events.OrderPlacedType, "order-placed")
 	mustEnsureSchema(ctx, serde, events.OrderConfirmedType, "order-confirmed")
+	mustEnsureSchema(ctx, serde, events.OrderCancelledType, "order-cancelled")
 
 	relay, err := orderkafka.NewRelay(brokers, "order.events", store, serde)
 	if err != nil {
@@ -46,15 +47,18 @@ func main() {
 
 	svc := order.NewService(store, store, events.NewEncoder())
 
-	// Saga subscriptions (topology §6): order reacts to inventory.events and
-	// payment.events, each in its own consumer group.
-	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events", orderkafka.StockReservedHandler(svc))
+	// Saga subscriptions (topology §6): order reacts to inventory.events
+	// (StockReserved + StockUnavailable) and payment.events (PaymentCaptured +
+	// PaymentFailed), each stream in its own consumer group.
+	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events",
+		orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc)))
 	if err != nil {
 		log.Fatalf("inventory consumer: %v", err)
 	}
 	go invConsumer.Run(ctx)
 
-	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events", orderkafka.PaymentCapturedHandler(svc))
+	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events",
+		orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc)))
 	if err != nil {
 		log.Fatalf("payment consumer: %v", err)
 	}

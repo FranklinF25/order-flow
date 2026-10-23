@@ -1,0 +1,15 @@
+{
+  "type": "record",
+  "name": "OrderCancelled",
+  "namespace": "orderflow.order",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "reason", "type": {
+      "type": "enum",
+      "name": "CancelReason",
+      "symbols": ["STOCK_UNAVAILABLE", "PAYMENT_FAILED"]
+    }}
+  ]
+}

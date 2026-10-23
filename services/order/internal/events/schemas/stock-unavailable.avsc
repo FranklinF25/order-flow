@@ -1,0 +1,22 @@
+{
+  "type": "record",
+  "name": "StockUnavailable",
+  "namespace": "orderflow.inventory",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "order_id", "type": "string"},
+    {"name": "occurred_at", "type": "string"},
+    {"name": "shortages", "type": {
+      "type": "array",
+      "items": {
+        "type": "record",
+        "name": "Shortage",
+        "fields": [
+          {"name": "sku", "type": "string"},
+          {"name": "requested", "type": "int"},
+          {"name": "available", "type": "int"}
+        ]
+      }
+    }}
+  ]
+}
