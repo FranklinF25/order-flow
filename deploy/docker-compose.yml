@@ -111,6 +111,23 @@ services:
       timeout: 5s
       retries: 12
 
+  notification-db:
+    image: postgres:16-alpine
+    container_name: order-flow-notification-db
+    environment:
+      POSTGRES_DB: notification
+      POSTGRES_USER: notification
+      POSTGRES_PASSWORD: notification
+    ports:
+      - "5435:5432"
+    volumes:
+      - notification-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U notification -d notification"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
   redis:
     image: redis:7-alpine
     container_name: order-flow-redis
@@ -165,6 +182,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       ORDER_DB_DSN: postgres://order:order@order-db:5432/order?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      REDIS_URL: redis:6379
     ports:
       - "8082:8080"
     volumes:
@@ -193,6 +211,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       INVENTORY_DB_DSN: postgres://inventory:inventory@inventory-db:5432/inventory?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      REDIS_URL: redis:6379
     ports:
       - "8083:8080"
     volumes:
@@ -221,6 +240,7 @@ services:
       KAFKA_BOOTSTRAP: kafka:29092
       PAYMENT_DB_DSN: postgres://payment:payment@payment-db:5432/payment?sslmode=disable
       SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      REDIS_URL: redis:6379
     ports:
       - "8084:8080"
     volumes:
@@ -238,10 +258,62 @@ services:
       retries: 12
       start_period: 10s
 
+  notification:
+    build:
+      context: ../services/notification
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    container_name: order-flow-notification
+    environment:
+      SERVICE_NAME: notification
+      SERVICE_ADDR: :8080
+      KAFKA_BOOTSTRAP: kafka:29092
+      NOTIFICATION_DB_DSN: postgres://notification:notification@notification-db:5432/notification?sslmode=disable
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    ports:
+      - "8085:8080"
+    volumes:
+      - ../services/notification:/app
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      kafka:
+        condition: service_healthy
+      notification-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  notification-mailer:
+    build:
+      context: ../services/notification
+      dockerfile: Dockerfile.dev
+    profiles: ["dev"]
+    container_name: order-flow-notification-mailer
+    command: ["air", "-c", ".air.toml", "--build.cmd", "go build -o ./tmp/mailer ./cmd/mailer", "--build.bin", "./tmp/mailer"]
+    environment:
+      SERVICE_NAME: notification-mailer
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    volumes:
+      - ../services/notification:/app
+      - go-mod-cache:/go/pkg/mod
+    depends_on:
+      notification-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
 volumes:
   kafka-data:
   order-db-data:
   inventory-db-data:
   payment-db-data:
+  notification-db-data:
   rabbit-data:
   go-mod-cache:
