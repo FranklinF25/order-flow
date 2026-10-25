@@ -1,0 +1,257 @@
+# Grafana alert rules for order-flow (M3, user decision: Grafana rules, no Alertmanager).
+# Semantics:
+# - DLQ parked: any message landing on a DLQ topic in the last 5m (topology §7 S4).
+#   DLQ topics have no consumer group, so depth = log end offset increase.
+# - Outbox stalled: unpublished rows sustained > 0 for 5m (the M2 L6 head-of-line class;
+#   transient relay ticks (~250ms) never sustain 5m).
+# - Consumer lag high: max group lag > 1000 sustained 5m (-1 marks unused partitions,
+#   max() ignores them).
+# noDataState OK is a DEV-ONLY choice: service metrics are absent while their dev
+# containers are down; a real channel flips this to Alerting.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: order-flow-reliability
+    folder: order-flow
+    interval: 30s
+    rules:
+      - title: "DLQ: messages parked in the last 5m"
+        uid: of-dlq-parked
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: orderflow-prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: orderflow-prometheus
+              editorMode: code
+              expr: 'sum(increase(kafka_topic_partition_current_offset{topic=~".*\\.dlq"}[5m]))'
+              instant: true
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: false
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              type: reduce
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        annotations:
+          summary: "Messages were parked on a DLQ topic in the last 5 minutes ({{ $values.A }} messages). Inspect the dlq.* headers of the parked records."
+        labels:
+          severity: warning
+          team: order-flow
+
+      - title: "Outbox: unpublished events stalled"
+        uid: of-outbox-stalled
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: orderflow-prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: orderflow-prometheus
+              editorMode: code
+              expr: 'max(orderflow_outbox_pending)'
+              instant: true
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: false
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              type: reduce
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 0
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "An outbox relay has unpublished rows sustained for 5 minutes ({{ $values.A }} pending). Likely a head-of-line stall — check the service logs for an unresolvable record type."
+        labels:
+          severity: warning
+          team: order-flow
+
+      - title: "Kafka: consumer group lag high"
+        uid: of-consumer-lag
+        condition: C
+        data:
+          - refId: A
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: orderflow-prometheus
+            model:
+              datasource:
+                type: prometheus
+                uid: orderflow-prometheus
+              editorMode: code
+              expr: 'max(kafka_consumergroup_lag)'
+              instant: true
+              intervalMs: 1000
+              legendFormat: __auto
+              maxDataPoints: 43200
+              range: false
+          - refId: B
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params: []
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - C
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
+              reducer: last
+              type: reduce
+          - refId: C
+            queryType: ""
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: __expr__
+            model:
+              conditions:
+                - evaluator:
+                    params:
+                      - 1000
+                    type: gt
+                  operator:
+                    type: and
+                  query:
+                    params:
+                      - B
+                  reducer:
+                    params: []
+                    type: last
+                  type: query
+              expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
+              type: threshold
+        noDataState: OK
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "A consumer group lagged > 1000 messages for 5 minutes ({{ $values.A }}). Check the consuming service and broker health."
+        labels:
+          severity: warning
+          team: order-flow

@@ -1,0 +1,88 @@
+{
+  "annotations": { "list": [ { "builtIn": 1, "datasource": { "type": "grafana", "uid": "-- Grafana --" }, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard" } ] },
+  "editable": true,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum(increase(kafka_topic_partition_current_offset{topic=~\".*\\\\.dlq\"}[5m]))", "legendFormat": "dlq msgs", "refId": "A" } ],
+      "title": "DLQ messages parked (5m)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "max(orderflow_outbox_pending)", "legendFormat": "pending", "refId": "A" } ],
+      "title": "Outbox unpublished rows (max, all services)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "max(kafka_consumergroup_lag)", "legendFormat": "lag", "refId": "A" } ],
+      "title": "Max consumer group lag (all groups)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 },
+      "id": 4,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "max by (consumergroup) (kafka_consumergroup_lag)", "legendFormat": "{{consumergroup}}", "refId": "A" } ],
+      "title": "Consumer group lag",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 },
+      "id": 5,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "max by (service) (orderflow_outbox_pending)", "legendFormat": "{{service}}", "refId": "A" } ],
+      "title": "Outbox pending by service (stall = sustained > 0)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "short" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 6,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (group) (increase(orderflow_dlq_parked_total[5m]))", "legendFormat": "{{group}}", "refId": "A" } ],
+      "title": "DLQ parks by consumer group (5m)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 7,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (group) (rate(orderflow_retries_total[2m])) * 60", "legendFormat": "retries {{group}}", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (service) (rate(orderflow_outbox_published_total[2m])) * 60", "legendFormat": "published {{service}}", "refId": "B" }
+      ],
+      "title": "Consumer retries & outbox publish rate (per minute)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [ "order-flow" ],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "order-flow / Reliability",
+  "uid": "of-reliability",
+  "version": 1
+}

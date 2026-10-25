@@ -1,0 +1,56 @@
+{
+  "annotations": { "list": [ { "builtIn": 1, "datasource": { "type": "grafana", "uid": "-- Grafana --" }, "enable": true, "hide": true, "iconColor": "rgba(0, 211, 255, 1)", "name": "Annotations & Alerts", "type": "dashboard" } ] },
+  "editable": true,
+  "graphTooltip": 0,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "orderflow_saga_orders", "legendFormat": "{{status}}", "refId": "A" } ],
+      "title": "Orders by status (live)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (kind) (increase(orderflow_notifications_published_total[5m]))", "legendFormat": "{{kind}}", "refId": "A" } ],
+      "title": "Notifications published (5m) by kind",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 7 },
+      "id": 3,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (event_type) (rate(orderflow_events_total[2m])) * 60", "legendFormat": "{{event_type}}", "refId": "A" } ],
+      "title": "Saga event trail by event type (per minute)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "axisCenteredZero": false, "axisColorMode": "text", "axisLabel": "", "axisPlacement": "auto", "barAlignment": 0, "drawStyle": "line", "fillOpacity": 10, "gradientMode": "none", "hideFrom": { "legend": false, "tooltip": false, "viz": false }, "lineInterpolation": "linear", "lineWidth": 1, "pointSize": 5, "scaleDistribution": { "type": "linear" }, "showPoints": "never", "spanNulls": true, "stacking": { "group": "A", "mode": "none" }, "thresholdsStyle": { "mode": "off" } }, "mappings": [], "unit": "ops" }, "overrides": [] },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 16 },
+      "id": 4,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [ { "datasource": { "type": "prometheus", "uid": "orderflow-prometheus" }, "expr": "sum by (service, outcome) (rate(orderflow_events_total[2m])) * 60", "legendFormat": "{{service}}/{{outcome}}", "refId": "A" } ],
+      "title": "Consumed events by service and outcome (per minute)",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [ "order-flow" ],
+  "templating": { "list": [] },
+  "time": { "from": "now-30m", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "order-flow / Saga overview",
+  "uid": "of-saga",
+  "version": 1
+}
