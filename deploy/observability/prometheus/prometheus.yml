@@ -1,0 +1,27 @@
+# Prometheus scrape config for order-flow (M3 observability).
+# Runs inside the compose network: service DNS names + internal ports.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Go services expose /metrics on their existing httpapi mux (same :8080 as /healthz).
+  # Targets show DOWN until their dev-profile containers are up and the
+  # metrics patch has landed (M3 T2-T5).
+  - job_name: order
+    static_configs:
+      - targets: ["order:8080"]
+  - job_name: inventory
+    static_configs:
+      - targets: ["inventory:8080"]
+  - job_name: payment
+    static_configs:
+      - targets: ["payment:8080"]
+  - job_name: notification
+    static_configs:
+      - targets: ["notification:8080"]
+
+  # Consumer-group lag and topic offsets straight from the broker.
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]

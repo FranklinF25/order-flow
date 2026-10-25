@@ -1,0 +1,13 @@
+# Grafana dashboard provisioning: JSON dashboards live in
+# deploy/observability/grafana/dashboards/ (M3 T6 authors them).
+apiVersion: 1
+
+providers:
+  - name: order-flow
+    folder: order-flow
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
