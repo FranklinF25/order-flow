@@ -69,21 +69,23 @@ func NewService(tx Tx, pub Publisher, enc EventEncoder) *Service {
 // to RabbitMQ. A fresh event id is minted for the emitted fact; the consumed
 // event id is guarded by processed_events. Duplicate event ids are silent
 // no-ops: no rows, no publish intent, nil error (offset commits safely).
-func (s *Service) Notify(ctx context.Context, in NotifyInput) error {
+// It reports whether the event was FRESH (business effect applied) or an
+// absorbed duplicate replay — the consumer's metric outcome label needs it.
+func (s *Service) Notify(ctx context.Context, in NotifyInput) (bool, error) {
 	if in.EventID == "" {
-		return errors.New("event id is required")
+		return false, errors.New("event id is required")
 	}
 	id, err := NewUUID()
 	if err != nil {
-		return err
+		return false, err
 	}
 	n, err := NewNotification(id, in.OrderID, in.Kind)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ev, err := s.enc.NotificationSent(n)
 	if err != nil {
-		return err
+		return false, err
 	}
 	fresh := false
 	err = s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
@@ -101,14 +103,14 @@ func (s *Service) Notify(ctx context.Context, in NotifyInput) error {
 		return st.AppendOutbox(ctx, ev)
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !fresh {
-		return nil
+		return false, nil // duplicate replay: absorbed, offset commits safely
 	}
 	// Post-commit publish intent: best-effort per topology §8.
 	s.publishBestEffort(ctx, n)
-	return nil
+	return true, nil
 }
 
 // publishBestEffort delivers the notification intent to RabbitMQ after the

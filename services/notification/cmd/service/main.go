@@ -59,7 +59,10 @@ func main() {
 	pub := mustRabbit(ctx, rabbitURL)
 	defer pub.Close()
 
-	svc := notification.NewService(store, pub, events.NewEncoder())
+	// MetricsPublisher counts successful RabbitMQ publishes by kind
+	// (orderflow_notifications_published_total); publish intent stays
+	// best-effort post-commit (topology §8).
+	svc := notification.NewService(store, rabbitmq.NewMetricsPublisher(pub), events.NewEncoder())
 
 	consumer, err := notificationkafka.NewConsumer(brokers, svc, events.NewDecoder(), dlq)
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/FranklinF25/order-flow/services/notification/internal/metrics"
 )
 
 // Handler processes one consumed record; its offset commits only after it
@@ -112,6 +114,7 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 			}
 			log.Printf("%s: attempt %d/%d failed: %v", group, attempt, maxHandlerAttempts, err)
 			if attempt < maxHandlerAttempts {
+				metrics.IncRetries(group) // a retry was scheduled and is blocked on backoff
 				delay := baseDelay << (attempt - 1)
 				select {
 				case <-ctx.Done():
@@ -127,6 +130,10 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 		}
 		log.Printf("%s: parked %s[%d] offset %d (event %s) on %s after %d failed attempts",
 			group, rec.Topic, rec.Partition, rec.Offset, headerValue(rec, "event_id"), topic, maxHandlerAttempts)
+		// Parked records commit their offset: one handled record, absorbed
+		// into the DLQ (no business effect); dlq_parked_total disambiguates.
+		metrics.IncDLQParked(group, rec.Topic)
+		metrics.IncEvents(group, rec.Topic, headerValue(rec, "event_type"), metrics.OutcomeAbsorbed)
 		return nil // offset commits: the poison record is parked, the stream continues
 	}
 }

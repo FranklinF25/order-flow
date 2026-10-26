@@ -99,7 +99,7 @@ func TestNotifyPersistsRowsAndPublishesIntent(t *testing.T) {
 	pub := &fakePublisher{}
 	svc := NewService(&fakeTx{store}, pub, fakeEncoder{})
 
-	if err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-1", OrderID: "ord-1", Kind: KindOrderConfirmed}); err != nil {
+	if _, err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-1", OrderID: "ord-1", Kind: KindOrderConfirmed}); err != nil {
 		t.Fatalf("Notify(confirmed): %v", err)
 	}
 	if !store.processed["evt-oc-1"] {
@@ -136,7 +136,7 @@ func TestNotifyPersistsRowsAndPublishesIntent(t *testing.T) {
 	}
 
 	// Same contract for OrderCancelled with its own routing key (rule 1, second kind).
-	if err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-2", OrderID: "ord-2", Kind: KindOrderCancelled}); err != nil {
+	if _, err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-2", OrderID: "ord-2", Kind: KindOrderCancelled}); err != nil {
 		t.Fatalf("Notify(cancelled): %v", err)
 	}
 	if got := store.notifications[1]; got.Kind != KindOrderCancelled || got.Channel != ChannelEmail {
@@ -155,7 +155,7 @@ func TestNotifyRabbitFailureIsBestEffort(t *testing.T) {
 	pub := &fakePublisher{fail: true}
 	svc := NewService(&fakeTx{store}, pub, fakeEncoder{})
 
-	if err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-1", OrderID: "ord-1", Kind: KindOrderConfirmed}); err != nil {
+	if _, err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-oc-1", OrderID: "ord-1", Kind: KindOrderConfirmed}); err != nil {
 		t.Fatalf("Notify must swallow rabbit failures, got %v", err)
 	}
 	if !store.processed["evt-oc-1"] || len(store.notifications) != 1 || len(store.outbox) != 1 {
@@ -172,9 +172,12 @@ func TestNotifyRejectsInvalidKind(t *testing.T) {
 	store := newFakeStore()
 	svc := NewService(&fakeTx{store}, &fakePublisher{}, fakeEncoder{})
 
-	err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-x", OrderID: "ord-1", Kind: Kind("SURPRISE")})
+	fresh, err := svc.Notify(context.Background(), NotifyInput{EventID: "evt-x", OrderID: "ord-1", Kind: Kind("SURPRISE")})
 	if !errors.Is(err, ErrInvalidKind) {
 		t.Fatalf("err = %v, want ErrInvalidKind", err)
+	}
+	if fresh {
+		t.Error("rejected input must not report fresh")
 	}
 	if len(store.notifications) != 0 || len(store.outbox) != 0 || len(store.processed) != 0 {
 		t.Error("invalid kind must persist nothing")
@@ -190,11 +193,16 @@ func TestNotifyDuplicateEventIsAbsorbed(t *testing.T) {
 	svc := NewService(&fakeTx{store}, pub, fakeEncoder{})
 	in := NotifyInput{EventID: "evt-oc-1", OrderID: "ord-1", Kind: KindOrderConfirmed}
 
-	if err := svc.Notify(context.Background(), in); err != nil {
-		t.Fatalf("first Notify: %v", err)
+	fresh, err := svc.Notify(context.Background(), in)
+	if err != nil || !fresh {
+		t.Fatalf("first Notify: err=%v fresh=%v, want nil/true", err, fresh)
 	}
-	if err := svc.Notify(context.Background(), in); err != nil {
+	fresh, err = svc.Notify(context.Background(), in)
+	if err != nil {
 		t.Fatalf("duplicate replay must be a no-op, got %v", err)
+	}
+	if fresh {
+		t.Error("duplicate replay must report fresh=false (absorbed)")
 	}
 	if len(store.notifications) != 1 {
 		t.Errorf("notification rows = %d, want 1 after replay", len(store.notifications))

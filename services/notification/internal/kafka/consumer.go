@@ -9,6 +9,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/FranklinF25/order-flow/services/notification/internal/events"
+	"github.com/FranklinF25/order-flow/services/notification/internal/metrics"
 	"github.com/FranklinF25/order-flow/services/notification/internal/notification"
 )
 
@@ -86,31 +87,58 @@ func (c *Consumer) Run(ctx context.Context) {
 
 // handle reacts ONLY to orderflow.order.OrderConfirmed and OrderCancelled
 // (topology §5 subscriptions); any other record on the stream is committed
-// and skipped.
+// and skipped. Every handled record increments orderflow_events_total with
+// the pinned outcome label: processed when the business effect applied,
+// absorbed for duplicate replays and non-matching pass-throughs (DLQ parks
+// are counted as absorbed by the WithRetries wrapper, which owns that
+// offset-commit decision).
 func (c *Consumer) handle(ctx context.Context, rec *kgo.Record) error {
-	switch headerValue(rec, "event_type") {
+	eventType := headerValue(rec, "event_type")
+	switch eventType {
 	case events.OrderConfirmedType:
 		ev, err := c.dec.DecodeOrderConfirmed(rec.Value)
 		if err != nil {
 			return fmt.Errorf("decode OrderConfirmed: %w", err)
 		}
-		return c.svc.Notify(ctx, notification.NotifyInput{
+		fresh, err := c.svc.Notify(ctx, notification.NotifyInput{
 			EventID: ev.EventID,
 			OrderID: ev.OrderID,
 			Kind:    notification.KindOrderConfirmed,
 		})
+		if err != nil {
+			return err
+		}
+		metrics.IncEvents(consumerGroup, rec.Topic, eventType, outcomeOf(fresh))
+		return nil
 	case events.OrderCancelledType:
 		ev, err := c.dec.DecodeOrderCancelled(rec.Value)
 		if err != nil {
 			return fmt.Errorf("decode OrderCancelled: %w", err)
 		}
-		return c.svc.Notify(ctx, notification.NotifyInput{
+		fresh, err := c.svc.Notify(ctx, notification.NotifyInput{
 			EventID: ev.EventID,
 			OrderID: ev.OrderID,
 			Kind:    notification.KindOrderCancelled,
 		})
+		if err != nil {
+			return err
+		}
+		metrics.IncEvents(consumerGroup, rec.Topic, eventType, outcomeOf(fresh))
+		return nil
 	}
+	// Non-matching event_type: committed pass-through — absorbed (no business
+	// effect), still one handled record on the metric contract.
+	metrics.IncEvents(consumerGroup, rec.Topic, eventType, metrics.OutcomeAbsorbed)
 	return nil
+}
+
+// outcomeOf maps the service's fresh/duplicate decision onto the pinned
+// outcome label values.
+func outcomeOf(fresh bool) string {
+	if fresh {
+		return metrics.OutcomeProcessed
+	}
+	return metrics.OutcomeAbsorbed
 }
 
 func headerValue(rec *kgo.Record, key string) string {

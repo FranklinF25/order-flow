@@ -136,6 +136,15 @@ func appendOutbox(ctx context.Context, ex execer, e notification.OutboxEvent) er
 	return err
 }
 
+// CountUnpublished returns the pending outbox row count (published_at IS
+// NULL) — the relay refreshes orderflow_outbox_pending with it every tick.
+func (s *Store) CountUnpublished(ctx context.Context) (int, error) {
+	var n int
+	err := s.pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	return n, err
+}
+
 // FetchUnpublished returns pending outbox events in creation order.
 func (s *Store) FetchUnpublished(ctx context.Context, limit int) ([]notification.OutboxEvent, error) {
 	rows, err := s.pool.Query(ctx,

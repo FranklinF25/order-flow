@@ -11,6 +11,7 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 
+	"github.com/FranklinF25/order-flow/services/notification/internal/metrics"
 	"github.com/FranklinF25/order-flow/services/notification/internal/notification"
 )
 
@@ -91,4 +92,29 @@ func (p *Publisher) Publish(ctx context.Context, n notification.Notification) er
 func (p *Publisher) Close() {
 	_ = p.ch.Close()
 	_ = p.conn.Close()
+}
+
+// MetricsPublisher decorates the notification.Publisher port with the pinned
+// notification-service counter: one orderflow_notifications_published_total
+// increment per SUCCESSFUL RabbitMQ publish, labeled by routing-key kind
+// (order.confirmed / order.cancelled). Failures count nothing — notifications
+// are best-effort and audited via the Kafka outbox (topology §8). The
+// decorator sits outside the domain so internal/notification stays pure; the
+// composition root wires NewMetricsPublisher around the real adapter.
+type MetricsPublisher struct {
+	inner notification.Publisher
+}
+
+// NewMetricsPublisher wraps a publisher with the publish counter.
+func NewMetricsPublisher(inner notification.Publisher) *MetricsPublisher {
+	return &MetricsPublisher{inner: inner}
+}
+
+// Publish delegates and, only on broker-accepted success, counts the kind.
+func (p *MetricsPublisher) Publish(ctx context.Context, n notification.Notification) error {
+	if err := p.inner.Publish(ctx, n); err != nil {
+		return err
+	}
+	metrics.IncNotificationPublished(n.Kind.RoutingKey())
+	return nil
 }
