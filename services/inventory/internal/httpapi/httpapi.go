@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/FranklinF25/order-flow/services/inventory/internal/inventory"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Server routes requests to the application service.
@@ -22,6 +23,10 @@ func New(svc *inventory.Service) http.Handler {
 	mux.HandleFunc("GET /inventory/healthz", handleHealth)
 	mux.HandleFunc("GET /healthz", handleHealth)
 	mux.HandleFunc("GET /inventory/stock", s.handleListStock)
+	// M3 metric contract: Prometheus exposition on the EXISTING mux (no new
+	// port, no new env) — the default registry carries the pinned orderflow_*
+	// collectors from internal/metrics.
+	mux.Handle("GET /metrics", promhttp.Handler())
 	return mux
 }
 

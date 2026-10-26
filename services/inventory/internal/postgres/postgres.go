@@ -277,6 +277,15 @@ func incrementStock(ctx context.Context, ex execer, sku string, qty int) error {
 	return err
 }
 
+// CountUnpublished returns the outbox backlog (published_at IS NULL) — the
+// relay refreshes orderflow_outbox_pending from it on every tick (M3 metric
+// contract; parent of the head-of-line stall alert).
+func (s *Store) CountUnpublished(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	return n, err
+}
+
 // FetchUnpublished returns pending outbox events in creation order.
 func (s *Store) FetchUnpublished(ctx context.Context, limit int) ([]inventory.OutboxEvent, error) {
 	rows, err := s.pool.Query(ctx,

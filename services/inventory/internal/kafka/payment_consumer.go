@@ -9,6 +9,7 @@ import (
 
 	"github.com/FranklinF25/order-flow/services/inventory/internal/events"
 	"github.com/FranklinF25/order-flow/services/inventory/internal/inventory"
+	"github.com/FranklinF25/order-flow/services/inventory/internal/metrics"
 )
 
 // PaymentConsumer consumes payment.events in group inventory.payment-events
@@ -27,6 +28,7 @@ import (
 type PaymentConsumer struct {
 	client  *kgo.Client
 	svc     *inventory.Service
+	group   string // consumer group — the pinned orderflow_events_total group label
 	handler Handler // c.handle wrapped with the Redis fast-gate (nil gate → unchanged)
 }
 
@@ -48,7 +50,7 @@ func NewPaymentConsumer(brokers []string, topic, group string, svc *inventory.Se
 	if err != nil {
 		return nil, fmt.Errorf("kafka client: %w", err)
 	}
-	c := &PaymentConsumer{client: cl, svc: svc}
+	c := &PaymentConsumer{client: cl, svc: svc, group: group}
 	// Fast-gate before dispatch (topology §7 first gate); absorb-on-hit
 	// returns nil, so the offset commits exactly like the absorbed no-op path.
 	// Retries/DLQ inside the gate: 3 blocking attempts, then the raw record
@@ -95,12 +97,16 @@ func (c *PaymentConsumer) Run(ctx context.Context) {
 // PaymentFailed facts. Any other event_type on the stream is not inventory's
 // concern and is skipped.
 func (c *PaymentConsumer) handle(ctx context.Context, rec *kgo.Record) error {
-	if headerValue(rec, "event_type") != events.PaymentFailedType {
-		return nil // PaymentCaptured / future facts never reach the domain
+	eventType := headerValue(rec, "event_type")
+	if eventType != events.PaymentFailedType {
+		// Pass-through: PaymentCaptured / future facts never reach the domain.
+		// Pinned contract: non-matching event_types classify as absorbed.
+		metrics.IncEvent(c.group, rec.Topic, eventType, metrics.OutcomeAbsorbed)
+		return nil
 	}
 	payload, err := StripWire(rec.Value)
 	if err != nil {
-		return err
+		return err // no outcome yet: the retry/DLQ counters own this record
 	}
 	ev, err := events.DecodePaymentFailed(payload)
 	if err != nil {
@@ -111,12 +117,13 @@ func (c *PaymentConsumer) handle(ctx context.Context, rec *kgo.Record) error {
 		OrderID: ev.OrderID,
 	})
 	if err != nil {
-		return err
+		return err // no outcome yet: the retry/DLQ counters own this record
 	}
 	if !applied {
 		// Absorbed: duplicate event, unknown order or already RELEASED. The
 		// transaction committed (or was a no-op); the offset commits above.
 		log.Printf("payment consumer: PaymentFailed %s for order %s absorbed (no-op)", ev.EventID, ev.OrderID)
 	}
+	metrics.IncEvent(c.group, rec.Topic, eventType, outcomeLabel(applied))
 	return nil
 }

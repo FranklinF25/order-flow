@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/FranklinF25/order-flow/services/inventory/internal/metrics"
 )
 
 // maxHandlerAttempts is the §7 blocking-retry budget: 1 initial attempt + 2
@@ -108,6 +110,7 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 			}
 			log.Printf("%s: attempt %d/%d failed: %v", group, attempt, maxHandlerAttempts, err)
 			if attempt < maxHandlerAttempts {
+				metrics.IncRetry(group) // a blocking retry attempt starts now (pinned contract)
 				delay := baseDelay << (attempt - 1)
 				select {
 				case <-ctx.Done():
@@ -123,6 +126,7 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 		}
 		log.Printf("%s: parked %s[%d] offset %d (event %s) on %s after %d failed attempts",
 			group, rec.Topic, rec.Partition, rec.Offset, headerValue(rec, "event_id"), topic, maxHandlerAttempts)
+		metrics.IncDlqParked(group, rec.Topic) // parked after the DLQ ack (parent of the M3 DLQ alert)
 		return nil // offset commits: the poison record is parked, the stream continues
 	}
 }
