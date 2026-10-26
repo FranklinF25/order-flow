@@ -78,42 +78,51 @@ func NewService(tx Tx, gw Gateway, enc EventEncoder) *Service {
 // double-charges the ledger: the processed_events guard skips duplicate
 // event ids and the order_id UNIQUE constraint makes a second write for the
 // same order a no-op — on both the capture and the decline path.
-func (s *Service) Capture(ctx context.Context, in CaptureInput) error {
+//
+// The fresh return reports whether the processed_events guard inserted this
+// event id (same convention as the Store's inserted bools): true = the event
+// was processed, false = a duplicate-marker replay was absorbed. The consumer
+// turns it into the pinned outcome label of orderflow_events_total
+// (processed | absorbed, M3 metric contract). Errors persist nothing and are
+// not a commit decision, so fresh is meaningless alongside a non-nil error.
+func (s *Service) Capture(ctx context.Context, in CaptureInput) (fresh bool, err error) {
 	if in.EventID == "" {
-		return errors.New("event id is required")
+		return false, errors.New("event id is required")
 	}
 	if in.OrderID == "" {
-		return errors.New("order id is required")
+		return false, errors.New("order id is required")
 	}
-	paymentID, err := s.gw.Capture(ctx, in.OrderID, in.AmountCents, in.CustomerID)
+	paymentID, gwErr := s.gw.Capture(ctx, in.OrderID, in.AmountCents, in.CustomerID)
 	var declined *DeclineError
-	if errors.As(err, &declined) {
+	if errors.As(gwErr, &declined) {
 		return s.fail(ctx, in, declined.Reason)
 	}
-	if err != nil {
-		return fmt.Errorf("gateway capture: %w", err)
+	if gwErr != nil {
+		return false, fmt.Errorf("gateway capture: %w", gwErr)
 	}
 	p, err := NewPayment(paymentID, in.OrderID, in.AmountCents)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ev, err := s.enc.PaymentCaptured(p)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
-		fresh, err := st.AppendProcessedEvent(ctx, in.EventID)
-		if err != nil {
-			return err
-		}
-		if !fresh {
-			return nil // duplicate StockReserved event: idempotent skip, nothing written
-		}
-		inserted, err := st.SavePayment(ctx, &p)
+	fresh = false // a later error leaves fresh meaningless (see doc above)
+	return fresh, s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		inserted, err := st.AppendProcessedEvent(ctx, in.EventID)
 		if err != nil {
 			return err
 		}
 		if !inserted {
+			return nil // duplicate StockReserved event: idempotent skip, nothing written
+		}
+		fresh = true // the guard inserted this event id: a fresh, processed event
+		saved, err := st.SavePayment(ctx, &p)
+		if err != nil {
+			return err
+		}
+		if !saved {
 			return nil // second capture for the same order: unique order_id no-op
 		}
 		return st.AppendOutbox(ctx, ev)
@@ -125,32 +134,34 @@ func (s *Service) Capture(ctx context.Context, in CaptureInput) error {
 // order_id UNIQUE as the idempotency real guard) and the PaymentFailed fact
 // that triggers compensation B (order cancel + inventory release). It mirrors
 // the capture path's guards so a replayed StockReserved absorbs as a no-op.
-func (s *Service) fail(ctx context.Context, in CaptureInput, reason FailureReason) error {
+func (s *Service) fail(ctx context.Context, in CaptureInput, reason FailureReason) (bool, error) {
 	id, err := NewUUID()
 	if err != nil {
-		return err
+		return false, err
 	}
 	p, err := NewFailedPayment(id, in.OrderID, in.AmountCents)
 	if err != nil {
-		return err
+		return false, err
 	}
 	ev, err := s.enc.PaymentFailed(in.OrderID, in.AmountCents, reason)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
-		fresh, err := st.AppendProcessedEvent(ctx, in.EventID)
-		if err != nil {
-			return err
-		}
-		if !fresh {
-			return nil // duplicate StockReserved event: idempotent skip, nothing written
-		}
-		inserted, err := st.SavePayment(ctx, &p)
+	fresh := false // a later error leaves fresh meaningless (see Capture doc above)
+	return fresh, s.tx.WithinTx(ctx, func(ctx context.Context, st Store) error {
+		inserted, err := st.AppendProcessedEvent(ctx, in.EventID)
 		if err != nil {
 			return err
 		}
 		if !inserted {
+			return nil // duplicate StockReserved event: idempotent skip, nothing written
+		}
+		fresh = true // the guard inserted this event id: a fresh, processed event
+		saved, err := st.SavePayment(ctx, &p)
+		if err != nil {
+			return err
+		}
+		if !saved {
 			return nil // a payment for this order already exists: unique order_id no-op
 		}
 		return st.AppendOutbox(ctx, ev)

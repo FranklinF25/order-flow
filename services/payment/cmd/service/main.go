@@ -15,6 +15,7 @@ import (
 
 	"github.com/FranklinF25/order-flow/services/payment/internal/events"
 	"github.com/FranklinF25/order-flow/services/payment/internal/httpapi"
+	"github.com/FranklinF25/order-flow/services/payment/internal/metrics"
 	paymentkafka "github.com/FranklinF25/order-flow/services/payment/internal/kafka"
 	"github.com/FranklinF25/order-flow/services/payment/internal/payment"
 	"github.com/FranklinF25/order-flow/services/payment/internal/postgres"
@@ -61,7 +62,11 @@ func main() {
 	mustEnsureSchema(ctx, serde, events.PaymentCapturedType, "payment-captured")
 	mustEnsureSchema(ctx, serde, events.PaymentFailedType, "payment-failed")
 
-	relay, err := paymentkafka.NewRelay(brokers, "payment.events", store, serde)
+	// One metrics instance serves the whole process: the relay, the consumer
+	// and GET /metrics (default registry) all share it.
+	m := metrics.New()
+
+	relay, err := paymentkafka.NewRelay(brokers, "payment.events", store, serde, m)
 	if err != nil {
 		log.Fatalf("relay: %v", err)
 	}
@@ -79,7 +84,7 @@ func main() {
 	svc := payment.NewService(store, payment.NewSimulatedGateway(), events.NewEncoder())
 
 	consumer, err := paymentkafka.NewConsumer(brokers, svc, events.NewDecoder(),
-		paymentkafka.NewRedisGate(rdb, "payment.inventory-events"), dlq)
+		paymentkafka.NewRedisGate(rdb, "payment.inventory-events"), dlq, m)
 	if err != nil {
 		log.Fatalf("consumer: %v", err)
 	}

@@ -127,7 +127,7 @@ func TestCaptureDeclinedMarkerPersistsFailedPaymentAndOutbox(t *testing.T) {
 	svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
 
 	in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998, CustomerID: "decline@x.com"}
-	if err := svc.Capture(context.Background(), in); err != nil {
+	if _, err := svc.Capture(context.Background(), in); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
 	p := store.payments["ord-1"]
@@ -172,7 +172,7 @@ func TestCaptureMarkerReasonsReachPaymentFailed(t *testing.T) {
 			store := newFakeStore()
 			svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
 			in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 2500, CustomerID: tc.customerID}
-			if err := svc.Capture(context.Background(), in); err != nil {
+			if _, err := svc.Capture(context.Background(), in); err != nil {
 				t.Fatalf("Capture: %v", err)
 			}
 			if p := store.payments["ord-1"]; p == nil || p.Status != StatusFailed {
@@ -198,15 +198,15 @@ func TestCaptureReplayedDeclinedEventIsNoOp(t *testing.T) {
 
 	ctx := context.Background()
 	in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 4998, CustomerID: "decline@x.com"}
-	if err := svc.Capture(ctx, in); err != nil {
+	if _, err := svc.Capture(ctx, in); err != nil {
 		t.Fatalf("first Capture: %v", err)
 	}
-	if err := svc.Capture(ctx, in); err != nil {
+	if _, err := svc.Capture(ctx, in); err != nil {
 		t.Fatalf("replayed Capture: %v", err)
 	}
 	second := in
 	second.EventID = "evt-stock-2"
-	if err := svc.Capture(ctx, second); err != nil {
+	if _, err := svc.Capture(ctx, second); err != nil {
 		t.Fatalf("second-event Capture: %v", err)
 	}
 	if len(store.payments) != 1 {
@@ -224,7 +224,7 @@ func TestCapturePlainCustomerStillCaptures(t *testing.T) {
 	gw := &fakeGateway{}
 	svc := NewService(&fakeTx{store}, gw, fakeEncoder{})
 
-	if err := svc.Capture(context.Background(), captureInput); err != nil {
+	if _, err := svc.Capture(context.Background(), captureInput); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
 	p := store.payments["ord-1"]
@@ -244,7 +244,7 @@ func TestCapturePersistsPaymentGuardAndOutboxEvent(t *testing.T) {
 	gw := &fakeGateway{}
 	svc := NewService(&fakeTx{store}, gw, fakeEncoder{})
 
-	if err := svc.Capture(context.Background(), captureInput); err != nil {
+	if _, err := svc.Capture(context.Background(), captureInput); err != nil {
 		t.Fatalf("Capture: %v", err)
 	}
 	p := store.payments["ord-1"]
@@ -280,11 +280,11 @@ func TestCaptureDuplicateStockReservedEventIsNoOp(t *testing.T) {
 	svc := NewService(&fakeTx{store}, &fakeGateway{}, fakeEncoder{})
 
 	ctx := context.Background()
-	if err := svc.Capture(ctx, captureInput); err != nil {
+	if _, err := svc.Capture(ctx, captureInput); err != nil {
 		t.Fatalf("first Capture: %v", err)
 	}
 	// Same StockReserved delivered again (at-least-once redelivery).
-	if err := svc.Capture(ctx, captureInput); err != nil {
+	if _, err := svc.Capture(ctx, captureInput); err != nil {
 		t.Fatalf("replayed Capture: %v", err)
 	}
 	if len(store.payments) != 1 {
@@ -300,14 +300,14 @@ func TestCaptureSecondCaptureForSameOrderIsNoOp(t *testing.T) {
 	svc := NewService(&fakeTx{store}, &fakeGateway{}, fakeEncoder{})
 
 	ctx := context.Background()
-	if err := svc.Capture(ctx, captureInput); err != nil {
+	if _, err := svc.Capture(ctx, captureInput); err != nil {
 		t.Fatalf("first Capture: %v", err)
 	}
 	// A second capture for the same order under a different event id must be
 	// absorbed by the order_id UNIQUE constraint, not error.
 	second := captureInput
 	second.EventID = "evt-stock-2"
-	if err := svc.Capture(ctx, second); err != nil {
+	if _, err := svc.Capture(ctx, second); err != nil {
 		t.Fatalf("second Capture: %v", err)
 	}
 	if len(store.payments) != 1 {
@@ -323,7 +323,7 @@ func TestCaptureRollsBackOnOutboxFailure(t *testing.T) {
 	store.failOn = "AppendOutbox"
 	svc := NewService(&fakeTx{store}, &fakeGateway{}, fakeEncoder{})
 
-	err := svc.Capture(context.Background(), captureInput)
+	_, err := svc.Capture(context.Background(), captureInput)
 	if err == nil {
 		t.Fatal("expected error from AppendOutbox failure")
 	}
@@ -342,7 +342,7 @@ func TestCaptureRollsBackOnSavePaymentFailure(t *testing.T) {
 	store.failOn = "SavePayment"
 	svc := NewService(&fakeTx{store}, &fakeGateway{}, fakeEncoder{})
 
-	err := svc.Capture(context.Background(), captureInput)
+	_, err := svc.Capture(context.Background(), captureInput)
 	if err == nil {
 		t.Fatal("expected error from SavePayment failure")
 	}
@@ -359,7 +359,7 @@ func TestCaptureGatewayErrorPropagatesWithoutPersisting(t *testing.T) {
 	gw := &fakeGateway{fail: true}
 	svc := NewService(&fakeTx{store}, gw, fakeEncoder{})
 
-	err := svc.Capture(context.Background(), captureInput)
+	_, err := svc.Capture(context.Background(), captureInput)
 	if err == nil {
 		t.Fatal("expected gateway error to propagate")
 	}
@@ -371,10 +371,69 @@ func TestCaptureGatewayErrorPropagatesWithoutPersisting(t *testing.T) {
 
 func TestCaptureValidationPropagates(t *testing.T) {
 	svc := NewService(&fakeTx{newFakeStore()}, &fakeGateway{}, fakeEncoder{})
-	if err := svc.Capture(context.Background(), CaptureInput{EventID: "evt-1"}); err == nil {
+	if _, err := svc.Capture(context.Background(), CaptureInput{EventID: "evt-1"}); err == nil {
 		t.Error("expected validation error for empty order id")
 	}
-	if err := svc.Capture(context.Background(), CaptureInput{OrderID: "ord-1"}); err == nil {
+	if _, err := svc.Capture(context.Background(), CaptureInput{OrderID: "ord-1"}); err == nil {
 		t.Error("expected validation error for empty event id")
+	}
+}
+
+// TestCaptureReportsFreshVsAbsorbed proves the M3 metric-contract seam: the
+// first delivery of an event id is FRESH (the processed_events guard inserted
+// it — outcome=processed for orderflow_events_total) and a redelivered event
+// id is a duplicate-marker replay the DB absorbs (fresh=false —
+// outcome=absorbed). A second capture for the same order under a NEW event id
+// is still fresh: the order_id UNIQUE no-op absorbs the write, not the event.
+func TestCaptureReportsFreshVsAbsorbed(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(&fakeTx{store}, &fakeGateway{}, fakeEncoder{})
+
+	ctx := context.Background()
+	fresh, err := svc.Capture(ctx, captureInput)
+	if err != nil {
+		t.Fatalf("first Capture: %v", err)
+	}
+	if !fresh {
+		t.Error("first delivery of an event id must report fresh=true (outcome=processed)")
+	}
+	fresh, err = svc.Capture(ctx, captureInput)
+	if err != nil {
+		t.Fatalf("replayed Capture: %v", err)
+	}
+	if fresh {
+		t.Error("duplicate-marker replay must report fresh=false (outcome=absorbed)")
+	}
+	second := captureInput
+	second.EventID = "evt-stock-2"
+	fresh, err = svc.Capture(ctx, second)
+	if err != nil {
+		t.Fatalf("second-event Capture: %v", err)
+	}
+	if !fresh {
+		t.Error("new event id on an already-captured order is still a fresh EVENT (guard inserted it)")
+	}
+}
+
+// The fail path mirrors the guard semantics: a fresh declined marker is
+// fresh, its replay is absorbed.
+func TestCaptureFailPathReportsFreshVsAbsorbed(t *testing.T) {
+	store := newFakeStore()
+	svc := NewService(&fakeTx{store}, NewSimulatedGateway(), fakeEncoder{})
+
+	in := CaptureInput{EventID: "evt-stock-1", OrderID: "ord-1", AmountCents: 2500, CustomerID: "decline@x.com"}
+	fresh, err := svc.Capture(context.Background(), in)
+	if err != nil {
+		t.Fatalf("declined Capture: %v", err)
+	}
+	if !fresh {
+		t.Error("first declined delivery must report fresh=true")
+	}
+	fresh, err = svc.Capture(context.Background(), in)
+	if err != nil {
+		t.Fatalf("replayed declined Capture: %v", err)
+	}
+	if fresh {
+		t.Error("replayed declined event must report fresh=false (guard absorbed it)")
 	}
 }
