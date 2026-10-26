@@ -15,6 +15,7 @@ import (
 	"github.com/FranklinF25/order-flow/services/order/internal/events"
 	"github.com/FranklinF25/order-flow/services/order/internal/httpapi"
 	orderkafka "github.com/FranklinF25/order-flow/services/order/internal/kafka"
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 	"github.com/FranklinF25/order-flow/services/order/internal/order"
 	"github.com/FranklinF25/order-flow/services/order/internal/postgres"
 	"github.com/redis/go-redis/v9"
@@ -53,6 +54,15 @@ func main() {
 	store := mustStore(ctx, dsn)
 	defer store.Close()
 
+	// Pinned orderflow metrics (M3): served on the existing httpapi mux at
+	// GET /metrics; every component below instruments through this instance.
+	m := metrics.New()
+	statusNames := make([]string, len(order.Statuses))
+	for i, s := range order.Statuses {
+		statusNames[i] = string(s)
+	}
+	go m.RunSagaOrdersPoller(ctx, statusNames, 15*time.Second, store.CountOrdersByStatus)
+
 	serde, err := orderkafka.NewSerde(srURL)
 	if err != nil {
 		log.Fatalf("serde: %v", err)
@@ -61,7 +71,7 @@ func main() {
 	mustEnsureSchema(ctx, serde, events.OrderConfirmedType, "order-confirmed")
 	mustEnsureSchema(ctx, serde, events.OrderCancelledType, "order-cancelled")
 
-	relay, err := orderkafka.NewRelay(brokers, "order.events", store, serde)
+	relay, err := orderkafka.NewRelay(brokers, "order.events", store, serde, m)
 	if err != nil {
 		log.Fatalf("relay: %v", err)
 	}
@@ -84,27 +94,29 @@ func main() {
 	// (outside-in): fast-gate → retries/DLQ → chained handlers — a gate
 	// absorb returns before any retry attempt is burned.
 	invConsumer, err := orderkafka.NewConsumer(brokers, "inventory.events", "order.inventory-events",
-		orderkafka.WithFastGate(
-			orderkafka.NewRedisGate(rdb, "order.inventory-events"),
-			orderkafka.WithRetries(dlq, orderkafka.RetryBaseDelay, "order.inventory-events",
-				orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc)))))
+		orderkafka.WithMetrics(m, "order.inventory-events",
+			orderkafka.WithFastGate(
+				orderkafka.NewRedisGate(rdb, "order.inventory-events"),
+				orderkafka.WithRetries(dlq, m, orderkafka.RetryBaseDelay, "order.inventory-events",
+					orderkafka.Chain(orderkafka.StockReservedHandler(svc), orderkafka.StockUnavailableHandler(svc))))))
 	if err != nil {
 		log.Fatalf("inventory consumer: %v", err)
 	}
 	go invConsumer.Run(ctx)
 
 	payConsumer, err := orderkafka.NewConsumer(brokers, "payment.events", "order.payment-events",
-		orderkafka.WithFastGate(
-			orderkafka.NewRedisGate(rdb, "order.payment-events"),
-			orderkafka.WithRetries(dlq, orderkafka.RetryBaseDelay, "order.payment-events",
-				orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc)))))
+		orderkafka.WithMetrics(m, "order.payment-events",
+			orderkafka.WithFastGate(
+				orderkafka.NewRedisGate(rdb, "order.payment-events"),
+				orderkafka.WithRetries(dlq, m, orderkafka.RetryBaseDelay, "order.payment-events",
+					orderkafka.Chain(orderkafka.PaymentCapturedHandler(svc), orderkafka.PaymentFailedHandler(svc))))))
 	if err != nil {
 		log.Fatalf("payment consumer: %v", err)
 	}
 	go payConsumer.Run(ctx)
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           httpapi.New(svc),
+		Handler:           httpapi.New(svc, m.Handler()),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

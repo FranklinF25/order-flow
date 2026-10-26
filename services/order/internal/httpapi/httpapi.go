@@ -15,8 +15,10 @@ type Server struct {
 	svc *order.Service
 }
 
-// New builds the HTTP handler.
-func New(svc *order.Service) http.Handler {
+// New builds the HTTP handler. metricsHandler serves the service's Prometheus
+// registry on the EXISTING mux (GET /metrics, M3 S2/S5: no new port); a nil
+// handler skips the route (metrics are optional to the API surface).
+func New(svc *order.Service, metricsHandler http.Handler) http.Handler {
 	s := &Server{svc: svc}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /orders", s.handlePlaceOrder)
@@ -25,6 +27,9 @@ func New(svc *order.Service) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	})
+	if metricsHandler != nil {
+		mux.Handle("GET /metrics", metricsHandler)
+	}
 	return mux
 }
 

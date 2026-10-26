@@ -22,6 +22,11 @@ const (
 	StatusCancelled       Status = "CANCELLED"
 )
 
+// Statuses lists every Order status in lifecycle order — exactly the label
+// set of the saga gauge orderflow_saga_orders (M3 metric contract; orders
+// are born AWAITING_STOCK, there is no persisted CREATED state).
+var Statuses = []Status{StatusAwaitingStock, StatusAwaitingPayment, StatusConfirmed, StatusCancelled}
+
 // CancelReason explains a terminal CANCELLED state.
 type CancelReason string
 

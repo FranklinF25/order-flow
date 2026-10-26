@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 )
 
 // fakeDLQ is the in-memory DLQProducer driving the retries/DLQ wrapper tests
@@ -87,7 +89,7 @@ func TestWithRetriesPoisonParksRawRecordOnDLQAndCommits(t *testing.T) {
 	dlq := &fakeDLQ{}
 	boom := errors.New("db unreachable")
 	h := &flakyHandler{failFirst: 3, err: boom}
-	wrapped := WithRetries(dlq, 0, "order.inventory-events", h.handle) // zero baseDelay: no real sleeping
+	wrapped := WithRetries(dlq, metrics.New(), 0, "order.inventory-events", h.handle) // zero baseDelay: no real sleeping
 
 	rec := poisonRecord()
 	start := time.Now()
@@ -138,7 +140,7 @@ func TestWithRetriesPoisonParksRawRecordOnDLQAndCommits(t *testing.T) {
 func TestWithRetriesTransientFailureRecoversWithoutDLQ(t *testing.T) {
 	dlq := &fakeDLQ{}
 	h := &flakyHandler{failFirst: 2, err: errors.New("transient deadlock")}
-	wrapped := WithRetries(dlq, 0, "order.inventory-events", h.handle)
+	wrapped := WithRetries(dlq, metrics.New(), 0, "order.inventory-events", h.handle)
 
 	if err := wrapped(context.Background(), poisonRecord()); err != nil {
 		t.Fatalf("recovery on the 3rd attempt must return nil, got %v", err)
@@ -156,7 +158,7 @@ func TestWithRetriesTransientFailureRecoversWithoutDLQ(t *testing.T) {
 func TestWithRetriesDLQProduceFailureReturnsError(t *testing.T) {
 	dlq := &fakeDLQ{produceErr: errors.New("broker down")}
 	h := &flakyHandler{failFirst: 3, err: errors.New("poison")}
-	wrapped := WithRetries(dlq, 0, "order.payment-events", h.handle)
+	wrapped := WithRetries(dlq, metrics.New(), 0, "order.payment-events", h.handle)
 
 	rec := poisonRecord()
 	rec.Topic = "payment.events"
@@ -176,7 +178,7 @@ func TestWithRetriesDLQProduceFailureReturnsError(t *testing.T) {
 func TestWithRetriesHonorsExponentialBackoff(t *testing.T) {
 	dlq := &fakeDLQ{}
 	h := &flakyHandler{failFirst: 2, err: errors.New("flaky")}
-	wrapped := WithRetries(dlq, 20*time.Millisecond, "order.inventory-events", h.handle)
+	wrapped := WithRetries(dlq, metrics.New(), 20*time.Millisecond, "order.inventory-events", h.handle)
 
 	start := time.Now()
 	if err := wrapped(context.Background(), poisonRecord()); err != nil {
@@ -195,7 +197,7 @@ func TestFastGateAbsorbPerformsZeroRetriesAndZeroDLQ(t *testing.T) {
 	gate.store["evt-42"] = true
 	dlq := &fakeDLQ{}
 	h := &flakyHandler{failFirst: 99, err: errors.New("must never run")}
-	wrapped := WithFastGate(gate, WithRetries(dlq, 0, "order.inventory-events", h.handle))
+	wrapped := WithFastGate(gate, WithRetries(dlq, metrics.New(), 0, "order.inventory-events", h.handle))
 
 	if err := wrapped(context.Background(), poisonRecord()); err != nil {
 		t.Fatalf("absorbed replay must return nil, got %v", err)

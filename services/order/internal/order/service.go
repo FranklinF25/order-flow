@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 )
 
 // OutboxEvent is an unpublished domain fact persisted in the same transaction
@@ -104,6 +106,7 @@ func (s *Service) OnStockReserved(ctx context.Context, eventID, orderID string) 
 			return err
 		}
 		if !inserted {
+			metrics.MarkAbsorbed(ctx) // duplicate replay: counted absorbed by WithMetrics
 			return nil
 		}
 		o, err := st.GetOrder(ctx, orderID)
@@ -127,6 +130,7 @@ func (s *Service) OnPaymentCaptured(ctx context.Context, eventID, orderID string
 			return err
 		}
 		if !inserted {
+			metrics.MarkAbsorbed(ctx) // duplicate replay: counted absorbed by WithMetrics
 			return nil
 		}
 		o, err := st.GetOrder(ctx, orderID)
@@ -175,6 +179,7 @@ func (s *Service) cancel(ctx context.Context, eventID, orderID string, apply fun
 			return err
 		}
 		if !inserted {
+			metrics.MarkAbsorbed(ctx) // duplicate replay: counted absorbed by WithMetrics
 			return nil
 		}
 		o, err := st.GetOrder(ctx, orderID)
@@ -184,7 +189,8 @@ func (s *Service) cancel(ctx context.Context, eventID, orderID string, apply fun
 		if err := apply(o); err != nil {
 			var ite *InvalidTransitionError
 			if errors.As(err, &ite) {
-				return nil // absorb: wrong/terminal state, no state change, no outbox
+				metrics.MarkAbsorbed(ctx) // wrong/terminal state: counted absorbed by WithMetrics
+				return nil               // absorb: no state change, no outbox
 			}
 			return err
 		}

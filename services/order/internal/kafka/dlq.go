@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 )
 
 // maxHandlerAttempts is the §7 blocking-retry budget: 1 initial attempt + 2
@@ -96,10 +98,16 @@ func dlqRecord(rec *kgo.Record, topic string, lastErr error) *kgo.Record {
 // produce failure returns the error instead: the offset stays uncommitted and
 // redelivery re-runs the whole path (at-least-once into the DLQ).
 //
+// Metrics (M3 contract): every blocked attempt — a failure that enters the
+// backoff — counts orderflow_retries_total{service,group}; the parking
+// attempt instead counts orderflow_dlq_parked_total{service,group,topic} and
+// marks the record absorbed for the outer WithMetrics (a parked record never
+// advanced the saga; the DLQ counter is the alert-bearing series).
+//
 // Composition matters: the fast-gate must sit OUTSIDE this wrapper
 // (WithFastGate(gate, WithRetries(...))) so an absorbed replay never burns
 // the retry budget, and exactly one retry mechanism wraps each consumer.
-func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Handler) Handler {
+func WithRetries(dlq DLQProducer, m *metrics.Metrics, baseDelay time.Duration, group string, next Handler) Handler {
 	return func(ctx context.Context, rec *kgo.Record) error {
 		var err error
 		for attempt := 1; attempt <= maxHandlerAttempts; attempt++ {
@@ -108,6 +116,9 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 			}
 			log.Printf("%s: attempt %d/%d failed: %v", group, attempt, maxHandlerAttempts, err)
 			if attempt < maxHandlerAttempts {
+				if m != nil {
+					m.IncRetries(group) // blocked attempt: it now waits out the backoff
+				}
 				delay := baseDelay << (attempt - 1)
 				select {
 				case <-ctx.Done():
@@ -123,6 +134,10 @@ func WithRetries(dlq DLQProducer, baseDelay time.Duration, group string, next Ha
 		}
 		log.Printf("%s: parked %s[%d] offset %d (event %s) on %s after %d failed attempts",
 			group, rec.Topic, rec.Partition, rec.Offset, headerValue(rec, "event_id"), topic, maxHandlerAttempts)
+		if m != nil {
+			m.IncDLQParked(group, rec.Topic)
+			metrics.MarkAbsorbed(ctx) // parked ≠ saga progress; the outer wrapper counts it absorbed
+		}
 		return nil // offset commits: the poison record is parked, the stream continues
 	}
 }

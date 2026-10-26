@@ -217,3 +217,32 @@ func (s *Store) MarkPublished(ctx context.Context, eventIDs []string, at time.Ti
 		`UPDATE outbox SET published_at = $1 WHERE event_id = ANY($2)`, at, eventIDs)
 	return err
 }
+
+// CountUnpublished counts outbox rows awaiting publication (published_at IS
+// NULL): the pinned orderflow_outbox_pending gauge, refreshed per relay tick.
+func (s *Store) CountUnpublished(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.pool.QueryRow(ctx,
+		`SELECT count(*) FROM outbox WHERE published_at IS NULL`).Scan(&n)
+	return n, err
+}
+
+// CountOrdersByStatus returns live order counts per status from ONE grouped
+// COUNT query — the bounded saga poller's fetch for orderflow_saga_orders.
+func (s *Store) CountOrdersByStatus(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.pool.Query(ctx, `SELECT status, count(*) FROM orders GROUP BY status`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int64{}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		counts[status] = n
+	}
+	return counts, rows.Err()
+}

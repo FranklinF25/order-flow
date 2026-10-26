@@ -8,6 +8,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/FranklinF25/order-flow/services/order/internal/events"
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 	"github.com/FranklinF25/order-flow/services/order/internal/order"
 )
 
@@ -92,6 +93,7 @@ func StockReservedHandler(svc *order.Service) Handler {
 		if headerValue(rec, "event_type") != events.StockReservedType {
 			return nil
 		}
+		metrics.MarkMatched(ctx) // subscribed: never a pass-through for WithMetrics
 		payload, err := StripWire(rec.Value)
 		if err != nil {
 			return err
@@ -111,6 +113,7 @@ func StockUnavailableHandler(svc *order.Service) Handler {
 		if headerValue(rec, "event_type") != events.StockUnavailableType {
 			return nil
 		}
+		metrics.MarkMatched(ctx) // subscribed: never a pass-through for WithMetrics
 		payload, err := StripWire(rec.Value)
 		if err != nil {
 			return err
@@ -129,6 +132,7 @@ func PaymentCapturedHandler(svc *order.Service) Handler {
 		if headerValue(rec, "event_type") != events.PaymentCapturedType {
 			return nil
 		}
+		metrics.MarkMatched(ctx) // subscribed: never a pass-through for WithMetrics
 		payload, err := StripWire(rec.Value)
 		if err != nil {
 			return err
@@ -148,6 +152,7 @@ func PaymentFailedHandler(svc *order.Service) Handler {
 		if headerValue(rec, "event_type") != events.PaymentFailedType {
 			return nil
 		}
+		metrics.MarkMatched(ctx) // subscribed: never a pass-through for WithMetrics
 		payload, err := StripWire(rec.Value)
 		if err != nil {
 			return err

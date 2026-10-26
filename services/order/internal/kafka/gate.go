@@ -7,6 +7,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
+
+	"github.com/FranklinF25/order-flow/services/order/internal/metrics"
 )
 
 // gateTTL is the fast-gate replay-absorption window (topology §7: TTL 72h).
@@ -88,7 +90,8 @@ func WithFastGate(gate FastGate, next Handler) Handler {
 		if err != nil {
 			log.Printf("fast-gate: check %s: %v (proceeding to handler)", eventID, err)
 		} else if seen {
-			return nil // absorbed: already processed; the offset commits below
+			metrics.MarkAbsorbed(ctx) // absorbed: counted as such by the outer WithMetrics
+			return nil               // already processed; the offset commits below
 		}
 		if err := next(ctx, rec); err != nil {
 			return err // tx not committed: never mark; redelivery retries
